@@ -7,9 +7,17 @@ from .scienceworld import EvalScienceworld
 from .jericho import EvalJericho
 from .tool import EvalTool
 from .pddl import EvalPddl
-from .pddl_structured import EvalPddlSt
-from .babyai_train import EvalBabyaiTrain
 from .neural import EvalNeural
+
+try:
+    from .pddl_structured import EvalPddlSt
+except ModuleNotFoundError:
+    EvalPddlSt = None
+
+try:
+    from .babyai_train import EvalBabyaiTrain
+except ModuleNotFoundError:
+    EvalBabyaiTrain = None
 
 from common.registry import registry
 
