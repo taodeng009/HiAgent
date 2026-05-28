@@ -19,7 +19,12 @@ class AlfWorld:
                  ):
         with open(base_config) as reader:
             config = yaml.safe_load(reader)
-        env = getattr(alfworld.agents.environment, config["env"]["type"])(config, train_eval=split)
+        env_type = config["env"]["type"]
+        if hasattr(alfworld.agents.environment, "get_environment"):
+            env_cls = alfworld.agents.environment.get_environment(env_type)
+        else:
+            env_cls = getattr(alfworld.agents.environment, env_type)
+        env = env_cls(config, train_eval=split)
         env.game_files.sort()
         self.env = env.init_env(batch_size)
         self.valid_actions = []
