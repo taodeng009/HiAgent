@@ -208,6 +208,11 @@ class ContextEfficientAgentV2(
                 '3. Each subgoal must be followed by at least one valid action. '
                 'After two consecutive "Nothing happens." observations, use "check valid actions" and select the next action from the listed valid actions.\n'
             )
+        elif self.check_actions_prompt_mode == "soft2":
+            check_actions_rule = (
+                '3. Each subgoal must be followed by at least one valid action. '
+                'If two consecutive actions fail, you need to execute "check valid actions" to get a list of valid actions and select one from the list.\n'
+            )
         elif self.check_actions_prompt_mode == "none":
             check_actions_rule = '3. Each subgoal must be followed by at least one valid action.\n'
         else:
