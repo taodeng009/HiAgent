@@ -34,6 +34,7 @@ class ContextEfficientAgentV2(
                  check_inventory=None,
                  use_parser=True,
                  enable_retrieve_instruction=True,
+                 check_actions_prompt_mode="strict",
                  ):
         super().__init__()
         self.use_parser = use_parser
@@ -62,6 +63,7 @@ class ContextEfficientAgentV2(
         self.check_actions = check_actions
         self.check_inventory = check_inventory
         self.enable_retrieve_instruction = enable_retrieve_instruction
+        self.check_actions_prompt_mode = check_actions_prompt_mode
 
         self.example_prompt = None
 
@@ -196,6 +198,20 @@ class ContextEfficientAgentV2(
             if self.enable_retrieve_instruction
             else ""
         )
+        if self.check_actions_prompt_mode == "strict":
+            check_actions_rule = (
+                '3. Each subgoal must be followed by at least one valid action. '
+                'If the current action fails, you need to execute "check valid actions" to get a list of valid actions and select one from the list.\n'
+            )
+        elif self.check_actions_prompt_mode == "soft":
+            check_actions_rule = (
+                '3. Each subgoal must be followed by at least one valid action. '
+                'After two consecutive "Nothing happens." observations, use "check valid actions" and select the next action from the listed valid actions.\n'
+            )
+        elif self.check_actions_prompt_mode == "none":
+            check_actions_rule = '3. Each subgoal must be followed by at least one valid action.\n'
+        else:
+            raise ValueError(f"Unsupported check_actions_prompt_mode: {self.check_actions_prompt_mode}")
         _ = f"""
 Note: A subgoal is a milestone goal that you need to complete in order to achieve the final goal. 
 When there is an unfinished subgoal, you need to ground the given subgoal to corresponding executable actions for solving the given task in the following format: \"Action: {{action}}\". 
@@ -203,7 +219,7 @@ When there is no current subgoal or you believe the previous subgoal has been co
 Instructions:
 1. You cannot output two subgoals consecutively. 
 2. Subgoal must be one line of text and does not print any newline characters. 
-3. Each subgoal must be followed by the execution of at least one valid action. If the current action fails, you need to execute "check valid actions" to get a list of valid actions and select one from the list.
+{check_actions_rule.rstrip()}
 {retrieve_instruction.rstrip()}
         """
        
@@ -351,5 +367,7 @@ Instructions:
         use_parser = config.get("use_parser", True)
         need_goal = config.get("need_goal", False)
         enable_retrieve_instruction = config.get("enable_retrieve_instruction", True)
+        check_actions_prompt_mode = config.get("check_actions_prompt_mode", "strict")
         return cls(llm_model, memory_size, examples, instruction, init_prompt_path, system_message, 
-                   need_goal, check_actions, check_inventory, use_parser, enable_retrieve_instruction)
+                   need_goal, check_actions, check_inventory, use_parser, enable_retrieve_instruction,
+                   check_actions_prompt_mode)
