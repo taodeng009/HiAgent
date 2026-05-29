@@ -33,6 +33,7 @@ class ContextEfficientAgentV2(
                  check_actions=None,
                  check_inventory=None,
                  use_parser=True,
+                 enable_retrieve_instruction=True,
                  ):
         super().__init__()
         self.use_parser = use_parser
@@ -60,6 +61,7 @@ class ContextEfficientAgentV2(
         self.need_goal = need_goal
         self.check_actions = check_actions
         self.check_inventory = check_inventory
+        self.enable_retrieve_instruction = enable_retrieve_instruction
 
         self.example_prompt = None
 
@@ -187,15 +189,22 @@ class ContextEfficientAgentV2(
         # 1. You cannot output two subgoals consecutively. 
         # 2. Subgoal must be one line of text and does not print any newline characters. Detailed trajectory information (action-observation pair) of previously satisfied subgoals will be hidden for context efficiency. If you believe that the detailed trajectory information of a particular subgoal is crucial for the current subgoal, you can use Action: \"retrieve(subgoal_id_1, subgoal_id_2, ...)\" to obtain the detailed trajectory information.
         # """
-        _ = """
+        retrieve_instruction = (
+            '4. Detailed trajectory information (action-observation pair) of previously satisfied subgoals will be hidden for context efficiency. '
+            'If you believe that the detailed trajectory information of a particular subgoal is crucial for the current subgoal, '
+            'you can use Action: "retrieve(subgoal_id_1, subgoal_id_2, ...)" to obtain the detailed trajectory information.\n'
+            if self.enable_retrieve_instruction
+            else ""
+        )
+        _ = f"""
 Note: A subgoal is a milestone goal that you need to complete in order to achieve the final goal. 
-When there is an unfinished subgoal, you need to ground the given subgoal to corresponding executable actions for solving the given task in the following format: \"Action: {action}\". 
-When there is no current subgoal or you believe the previous subgoal has been completed (based on past actions and observations), you need to output the next subgoal to be completed and its first action in the following format: \"Subgoal: {subgoal}\\nAction: {action}\". 
+When there is an unfinished subgoal, you need to ground the given subgoal to corresponding executable actions for solving the given task in the following format: \"Action: {{action}}\". 
+When there is no current subgoal or you believe the previous subgoal has been completed (based on past actions and observations), you need to output the next subgoal to be completed and its first action in the following format: \"Subgoal: {{subgoal}}\\nAction: {{action}}\". 
 Instructions:
 1. You cannot output two subgoals consecutively. 
 2. Subgoal must be one line of text and does not print any newline characters. 
 3. Each subgoal must be followed by the execution of at least one valid action. If the current action fails, you need to execute "check valid actions" to get a list of valid actions and select one from the list.
-4. Detailed trajectory information (action-observation pair) of previously satisfied subgoals will be hidden for context efficiency. If you believe that the detailed trajectory information of a particular subgoal is crucial for the current subgoal, you can use Action: \"retrieve(subgoal_id_1, subgoal_id_2, ...)\" to obtain the detailed trajectory information.
+{retrieve_instruction.rstrip()}
         """
        
 
@@ -341,5 +350,6 @@ Instructions:
         check_inventory = config.get("check_inventory", None)
         use_parser = config.get("use_parser", True)
         need_goal = config.get("need_goal", False)
+        enable_retrieve_instruction = config.get("enable_retrieve_instruction", True)
         return cls(llm_model, memory_size, examples, instruction, init_prompt_path, system_message, 
-                   need_goal, check_actions, check_inventory, use_parser)
+                   need_goal, check_actions, check_inventory, use_parser, enable_retrieve_instruction)
