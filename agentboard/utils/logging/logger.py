@@ -376,6 +376,8 @@ class TaskLogger:
                 results = []
                 for line in open(file_path, "r"):
                     result = self.extract_variables(line)
+                    if result is None:
+                        continue
                     result['score_state'] = self.complete_score_state(result['score_state'])
                     results.append(result) 
                 # acculated score
@@ -513,6 +515,18 @@ class TaskLogger:
         with open(self.log_summary_path, "a+") as f:
             f.write(f"[EXP] {id}: [success_rate]: {is_done}, [progress_rate]: {reward}, [grounding_acc]: {grounding_accuracy}, [score_state]: {score_change_record} \n")
 
+    def save_summary_to_file(self, success_rate, reward_score, grounding_acc, hard_sr=None, hard_rs=None, easy_sr=None, easy_rs=None):
+        with open(self.log_summary_path, "a+") as f:
+            f.write(
+                f"[SUMMARY]: [success_rate]: {success_rate}, "
+                f"[progress_rate]: {reward_score}, "
+                f"[grounding_acc]: {grounding_acc}, "
+                f"[hard_success_rate]: {hard_sr}, "
+                f"[hard_progress_rate]: {hard_rs}, "
+                f"[easy_success_rate]: {easy_sr}, "
+                f"[easy_progress_rate]: {easy_rs}\n"
+            )
+
         
            
     def log_example(self, id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt=None):
@@ -528,6 +542,7 @@ class TaskLogger:
         # wandb.log({"{task}/success_rate".format(task=self.task_name) : success_rate,
         #            "{task}/reward_score".format(task=self.task_name) : reward_score,
         #            "{task}/grounding_acc".format(task=self.task_name) : grounding_acc})
+        self.save_summary_to_file(success_rate, reward_score, grounding_acc, hard_sr, hard_rs, easy_sr, easy_rs)
         
         # log success rate, reward score, grounding accuracy to a table
         metrics_table = wandb.Table(columns=["Metric Name", "Metric Value (%)"])
