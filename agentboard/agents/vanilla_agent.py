@@ -180,7 +180,7 @@ class VanillaAgent(
         
         self.log_example_prompt(input_prompt)
 
-        # print(f'------------Input Prompt----------\n{input_prompt}\n-----------------Input Prompt END------------')
+        print(f'------------[Prompt Start]-----------\n{input_prompt}\n----------[Prompt END]------------')
         success, action = self.llm_model.generate(system_message, input_prompt)
         print(f'------------GPT Response----------\n{action}\n-----------------GPT Response END------------')
         # print('original output', action) 
