@@ -1,10 +1,14 @@
 from .openai_gpt import OPENAI_GPT
 from .azure_gpt import OPENAI_GPT_AZURE
 from .claude import CLAUDE
-from .vllm import VLLM
 from common.registry import registry
 from .huggingface import HgModels
 from .msal_gpt import MSAL_GPT
+
+try:
+    from .vllm import VLLM
+except ModuleNotFoundError:
+    VLLM = None
 
 __all__ = [
     "OPENAI_GPT",
