@@ -5,8 +5,9 @@ from common.registry import registry
 from .ours_agent import OurAgent
 from .cme_final import ContextEfficientAgentV2
 from .plugmem_agent import PlugMemContextEfficientAgent
+from .gmemory_agent import GMemoryContextEfficientAgent
 
-__all__ = ["VanillaAgent", "ReactAgent", "CustomReactAgent", "OurAgent", "ContextEfficientAgentV2", "PlugMemContextEfficientAgent"]
+__all__ = ["VanillaAgent", "ReactAgent", "CustomReactAgent", "OurAgent", "ContextEfficientAgentV2", "PlugMemContextEfficientAgent", "GMemoryContextEfficientAgent"]
 
 
 def load_agent(name, config, llm_model):
