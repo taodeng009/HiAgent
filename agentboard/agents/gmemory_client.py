@@ -32,6 +32,27 @@ class GMemoryClient:
             raise RuntimeError("GMemory retrieve response is missing `memory_prompt`")
         return data
 
+    def save_episode(
+        self,
+        task_type: str,
+        goal: Optional[str],
+        initial_observation: str,
+        success: bool,
+        progress_rate: Optional[float],
+        steps: Any,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "task_type": task_type,
+            "goal": goal,
+            "initial_observation": initial_observation,
+            "success": success,
+            "progress_rate": progress_rate,
+            "steps": steps,
+            "metadata": metadata or {},
+        }
+        return self._post("/api/v1/memory/episodes", payload)
+
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         response_body = self._post_raw(path, payload)
         if not response_body:

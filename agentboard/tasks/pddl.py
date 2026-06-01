@@ -59,11 +59,16 @@ class EvalPddl(BaseTask):
         
         self.agentboard = TaskLogger(task_name="pddl", log_path=log_path, max_num_steps=self.max_num_steps, baseline_dir=self.baseline_dir)
 
-    def _remember_current_task(self, game_name):
+    def _remember_current_task(self, game_name, success, progress_rate=None, score_change_record=None):
         if not hasattr(self.agent, "remember_current_task"):
             return
         try:
-            self.agent.remember_current_task(task_type=game_name)
+            self.agent.remember_current_task(
+                task_type=game_name,
+                success=success,
+                progress_rate=progress_rate,
+                score_change_record=score_change_record,
+            )
         except Exception as exc:
             logger.warning("remember_current_task failed: {}".format(exc))
 
@@ -177,7 +182,7 @@ class EvalPddl(BaseTask):
                 try: example_prompt = self.agent.get_example_prompt()
                 except: example_prompt = None  
                 self.agentboard.log_example(id, env.won, progress_rate, grounding_acc_count / (step_id + 1), score_change_record, env_details, trajectory, example_prompt)
-                self._remember_current_task(game_name)
+                self._remember_current_task(game_name, env.won, progress_rate, score_change_record)
 
                 return env.won, progress_rate, step_id + 1, grounding_acc_count / (step_id + 1), score_change_record
 
@@ -191,7 +196,7 @@ class EvalPddl(BaseTask):
         progress_rate = reward
         
         self.agentboard.log_example(id, False, progress_rate, grounding_acc_count / (step_id + 1), score_change_record, env_details, trajectory, example_prompt)
-        self._remember_current_task(game_name)
+        self._remember_current_task(game_name, False, progress_rate, score_change_record)
             
         return False, progress_rate, step_id + 1, grounding_acc_count / (step_id + 1), score_change_record
                 

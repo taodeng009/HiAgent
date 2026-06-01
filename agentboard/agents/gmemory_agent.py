@@ -52,6 +52,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_config = gmemory or {}
         self.gmemory_enabled = bool(self.gmemory_config.get("enabled", False))
         self.gmemory_recall_on_reset = bool(self.gmemory_config.get("recall_on_reset", True))
+        self.gmemory_upload_on_finish = bool(self.gmemory_config.get("upload_on_finish", True))
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
         self.gmemory_prompt = ""
         self.gmemory_client = self._build_gmemory_client()
@@ -122,6 +123,129 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         key, value = history[0][0]
         marker = f"{key}: {value}"
         return marker if value is not None else f"{key}: "
+
+    def remember_current_task(
+        self,
+        task_type: str = "",
+        success: Optional[bool] = None,
+        progress_rate: Optional[float] = None,
+        score_change_record=None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        if not self.gmemory_enabled or not self.gmemory_upload_on_finish or self.gmemory_client is None:
+            return None
+        if success is None:
+            logger.warning("GMemory episode upload skipped: success is missing")
+            return None
+        episode = self._memory_to_gmemory_episode(
+            task_type=task_type,
+            success=success,
+            progress_rate=progress_rate,
+            score_change_record=score_change_record,
+            metadata=metadata,
+        )
+        if episode is None:
+            return None
+        try:
+            response = self.gmemory_client.save_episode(**episode)
+            if response.get("stored") is False:
+                logger.warning("GMemory episode upload was not stored: %s", response)
+            return response
+        except Exception as exc:
+            logger.warning("GMemory episode upload failed: %s", exc)
+            return None
+
+    def _memory_to_gmemory_episode(
+        self,
+        task_type: str,
+        success: bool,
+        progress_rate: Optional[float],
+        score_change_record=None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        memory = getattr(self, "memory", [])
+        initial_observation = getattr(self, "init_obs", None)
+        reward_by_step = self._score_change_record_to_dict(score_change_record)
+        steps = []
+        current_subgoal = None
+        action_step_id = 0
+
+        for item in memory:
+            fields = dict(item)
+            if "Subgoal" in fields:
+                current_subgoal = fields.get("Subgoal")
+                continue
+            action = fields.get("Action")
+            observation = fields.get("Observation")
+            if initial_observation is None and observation is not None:
+                initial_observation = observation
+            if action is None:
+                continue
+            step = {
+                "subgoal": current_subgoal,
+                "action": str(action),
+                "observation": str(observation or ""),
+            }
+            if action_step_id in reward_by_step:
+                step["reward"] = reward_by_step[action_step_id]
+            steps.append(step)
+            action_step_id += 1
+
+        if not steps:
+            logger.warning("GMemory episode upload skipped: no action steps recorded")
+            return None
+
+        episode_metadata = {
+            "agent": "GMemoryContextEfficientAgent",
+            "score_change_record": self._normalise_score_change_record(score_change_record),
+            "step_count": len(steps),
+        }
+        if metadata:
+            episode_metadata.update(metadata)
+
+        return {
+            "task_type": task_type or self.gmemory_config.get("task_type") or os.environ.get("EVALTASK", ""),
+            "goal": getattr(self, "goal", None),
+            "initial_observation": str(initial_observation or ""),
+            "success": bool(success),
+            "progress_rate": self._json_scalar(progress_rate),
+            "steps": steps,
+            "metadata": episode_metadata,
+        }
+
+    def _score_change_record_to_dict(self, score_change_record) -> Dict[int, Any]:
+        if not score_change_record:
+            return {}
+        rewards = {}
+        for item in score_change_record:
+            try:
+                step_id, reward = item
+                rewards[int(step_id)] = self._json_scalar(reward)
+            except (TypeError, ValueError):
+                continue
+        return rewards
+
+    def _normalise_score_change_record(self, score_change_record):
+        if not score_change_record:
+            return []
+        normalised = []
+        for item in score_change_record:
+            try:
+                step_id, reward = item
+                normalised.append([int(step_id), self._json_scalar(reward)])
+            except (TypeError, ValueError):
+                continue
+        return normalised
+
+    def _json_scalar(self, value):
+        if value is None:
+            return None
+        try:
+            if hasattr(value, "item"):
+                return value.item()
+            return float(value)
+        except (TypeError, ValueError):
+            return value
 
     @classmethod
     def from_config(cls, llm_model, config):
