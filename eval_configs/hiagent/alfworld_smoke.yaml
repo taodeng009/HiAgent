@@ -1,5 +1,6 @@
 run:
   max_num_steps: 30
+  num_exam: 10
   wandb: True
   project_name: eval-test
   baseline_dir: data/baseline_results
@@ -12,19 +13,22 @@ agent:
   memory_size: 100
   need_goal: True
   use_parser: True
+  enable_retrieve_instruction: False
+  # check_actions_prompt_mode controls the extra HiAgent subgoal rule for "check valid actions":
+  #   strict: original behavior; after an action fails, instruct the model to use "check valid actions".
+  #   soft: use "check valid actions" only after two consecutive "Nothing happens." observations, then select from listed valid actions.
+  #   soft2: minimal strict variant; after two consecutive failed actions, instruct the model to use "check valid actions" and select one from the list.
+  #   none: do not add an extra subgoal-rule reminder; only keep the env-level help command.
+  check_actions_prompt_mode: soft2
   plugmem:
     enabled: False
     base_url: http://localhost:8080
-    api_key: dev-key-change-me
+    api_key: plugmem
     graph_id: hiagent-cross-task
+    recall_mode: recall_text
     recall_on_reset: True
     upload_on_finish: True
-  gmemory:
-    enabled: False
-    base_url: http://127.0.0.1:8090
-    recall_on_reset: True
-    max_context_chars: 1000
-    timeout: 10.0
+    timeout: 600
 
 llm:
   gpt-4-turbo:
