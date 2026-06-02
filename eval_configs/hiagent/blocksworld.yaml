@@ -12,6 +12,7 @@ agent:
   memory_size: 100
   need_goal: True
   use_parser: True
+  enable_retrieve_instruction: False
   plugmem:
     enabled: False
     base_url: http://localhost:8080
