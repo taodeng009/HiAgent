@@ -24,8 +24,9 @@ agent:
     enabled: False
     base_url: http://127.0.0.1:8090
     recall_on_reset: True
+    upload_on_finish: True
     max_context_chars: 1000
-    timeout: 10.0
+    timeout: 180.0
 
 llm:
   gpt-4-turbo:
