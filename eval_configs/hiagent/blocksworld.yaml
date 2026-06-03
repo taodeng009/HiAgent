@@ -25,6 +25,8 @@ agent:
     base_url: http://127.0.0.1:8090
     recall_on_reset: True
     upload_on_finish: True
+    # Keep only cross-task memory sections; HiAgent owns the current task prompt.
+    memory_only: True
     max_context_chars: 1000
     timeout: 180.0
 

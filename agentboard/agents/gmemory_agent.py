@@ -54,6 +54,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_recall_on_reset = bool(self.gmemory_config.get("recall_on_reset", True))
         self.gmemory_upload_on_finish = bool(self.gmemory_config.get("upload_on_finish", True))
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
+        self.gmemory_memory_only = bool(self.gmemory_config.get("memory_only", False))
         self.gmemory_prompt = ""
         self.gmemory_client = self._build_gmemory_client()
 
@@ -115,10 +116,29 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if not text:
             return ""
         context = re.sub(r"\n{3,}", "\n\n", str(text).strip())
+        if self.gmemory_memory_only:
+            context = self._extract_memory_sections(context)
         max_chars = max(0, self.gmemory_max_context_chars)
         if max_chars and len(context) > max_chars:
             context = context[:max_chars].rstrip()
         return context
+
+    def _extract_memory_sections(self, context: str) -> str:
+        target_headings = [
+            "## Your Own Past Successes (Execution Patterns)",
+            "## Key Insights from Related Tasks",
+        ]
+        sections = []
+        for heading in target_headings:
+            start = context.find(heading)
+            if start < 0:
+                continue
+            next_heading = context.find("\n## ", start + len(heading))
+            end = next_heading if next_heading >= 0 else len(context)
+            section = context[start:end].strip()
+            if section:
+                sections.append(section)
+        return "\n\n".join(sections) if sections else context
 
     def _current_history_marker(self) -> Optional[str]:
         history = getattr(self, "memory", [])[-self.memory_size:]
