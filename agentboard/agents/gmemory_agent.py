@@ -1,7 +1,6 @@
 """Context-efficient HiAgent variant with GMemory retrieval hooks."""
 from __future__ import annotations
 
-import logging
 import os
 import re
 from contextlib import redirect_stdout
@@ -9,12 +8,13 @@ from io import StringIO
 from typing import Any, Dict, Optional
 
 from common.registry import registry
+from utils.logging.agent_logger import AgentLogger
 
 from .cme_final import ContextEfficientAgentV2
 from .gmemory_client import GMemoryClient
 
 
-logger = logging.getLogger(__name__)
+logger = AgentLogger(__name__)
 
 
 @registry.register_agent("GMemoryContextEfficientAgent")
