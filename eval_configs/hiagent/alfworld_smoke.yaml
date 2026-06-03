@@ -1,6 +1,6 @@
 run:
   max_num_steps: 30
-  num_exam: 10
+  num_exam: 30
   wandb: True
   project_name: eval-test
   baseline_dir: data/baseline_results
@@ -19,7 +19,7 @@ agent:
   #   soft: use "check valid actions" only after two consecutive "Nothing happens." observations, then select from listed valid actions.
   #   soft2: minimal strict variant; after two consecutive failed actions, instruct the model to use "check valid actions" and select one from the list.
   #   none: do not add an extra subgoal-rule reminder; only keep the env-level help command.
-  check_actions_prompt_mode: soft2
+  check_actions_prompt_mode: strict
   plugmem:
     enabled: False
     base_url: http://localhost:8080
@@ -29,6 +29,15 @@ agent:
     recall_on_reset: True
     upload_on_finish: True
     timeout: 600
+  gmemory:
+    enabled: True
+    base_url: http://127.0.0.1:8090
+    task_type: alfworld
+    recall_on_reset: True
+    upload_on_finish: True
+    memory_only: True
+    max_context_chars: 5000
+    timeout: 180.0
 
 llm:
   gpt-4-turbo:

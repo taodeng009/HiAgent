@@ -12,6 +12,15 @@ agent:
   memory_size: 100
   need_goal: True
   use_parser: True
+  gmemory:
+    enabled: True
+    base_url: http://127.0.0.1:8090
+    task_type: barman
+    recall_on_reset: True
+    upload_on_finish: True
+    memory_only: True
+    max_context_chars: 1000
+    timeout: 180.0
 
 llm:
   gpt-4-turbo:
