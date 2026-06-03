@@ -81,6 +81,10 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 max_chars=self.gmemory_max_context_chars,
             )
             self.gmemory_prompt = self._filter_gmemory_prompt(response.get("memory_prompt", ""))
+            logger.info(
+                "GMemory retrieve completed: memory_prompt_chars=%s",
+                len(self.gmemory_prompt),
+            )
         except Exception as exc:
             self.gmemory_prompt = ""
             logger.warning("GMemory retrieve failed: %s", exc)
@@ -148,6 +152,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             return None
         try:
             response = self.gmemory_client.save_episode(**episode)
+            logger.info(
+                "GMemory episode upload completed: stored=%s episode_id=%s",
+                response.get("stored"),
+                response.get("episode_id"),
+            )
             if response.get("stored") is False:
                 logger.warning("GMemory episode upload was not stored: %s", response)
             return response
