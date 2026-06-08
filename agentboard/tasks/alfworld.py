@@ -88,6 +88,12 @@ class Evalalfworld(BaseTask):
         except Exception as exc:
             logger.warning("remember_current_task failed: {}".format(exc))
 
+    def _get_example_prompt(self):
+        try:
+            return self.agent.get_example_prompt()
+        except Exception:
+            return None
+
     def evaluate_env(self,  index, ob='', examples=None):
 
         init_ob = ob.split('\n')[0]
@@ -142,7 +148,8 @@ class Evalalfworld(BaseTask):
             if done:
                 game_name = self.env.cur_task_name.split('/')[0]
                 env_details = {"task_name": game_name, "goal": self.agent.goal, "difficulty": self.env.difficulty}
-                self.agentboard.log_example(index, True, reward, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory)
+                example_prompt = self._get_example_prompt()
+                self.agentboard.log_example(index, True, reward, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt)
                 self._remember_current_task(index, game_name, done, reward, score_change_record)
 
                 return 1.0, True, grounding_acc_count / (i + 1), score_change_record, i
@@ -151,11 +158,10 @@ class Evalalfworld(BaseTask):
         game_name = self.env.cur_task_name.split('/')[0]
         env_details = {"task_name": game_name, "goal": self.agent.goal, "difficulty": self.env.difficulty}
         
-        
+
         progress_rate = reward
 
-        try: example_prompt = self.agent.get_example_prompt()
-        except: example_prompt = None
+        example_prompt = self._get_example_prompt()
         self.agentboard.log_example(index, done, progress_rate, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt)
         self._remember_current_task(index, game_name, done, progress_rate, score_change_record)
 
