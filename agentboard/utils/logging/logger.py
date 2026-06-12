@@ -478,7 +478,7 @@ class TaskLogger:
             )
         wandb.log({"{task}/predictions".format(task=self.task_name) : new_table})
     
-    def save_sample_data_to_file_detailed(self, id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt):
+    def save_sample_data_to_file_detailed(self, id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt, agent_diagnostics=None):
         if self.task_name not in ["webarena"]:
             is_done = bool(is_done)
         reward = float(reward)
@@ -507,6 +507,8 @@ class TaskLogger:
         
         if example_prompt is not None:
             sample_result["example_prompt"] = example_prompt
+        if agent_diagnostics is not None:
+            sample_result["agent_diagnostics"] = agent_diagnostics
 
         with open(self.log_path, "a+") as f:
             f.write(json.dumps(sample_result, indent=2)+'\n')
@@ -529,8 +531,8 @@ class TaskLogger:
 
         
            
-    def log_example(self, id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt=None):
-        self.save_sample_data_to_file_detailed(id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt) # log to file
+    def log_example(self, id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt=None, agent_diagnostics=None):
+        self.save_sample_data_to_file_detailed(id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory, example_prompt, agent_diagnostics) # log to file
         self.save_sample_data_to_file_overview(id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory) 
         
         self.log_example_data(id, is_done, reward, grounding_accuracy, score_change_record, env_details, trajectory) # log to wandb table

@@ -94,6 +94,43 @@ class Evalalfworld(BaseTask):
         except Exception:
             return None
 
+    def _get_agent_diagnostics(self, action_stats=None):
+        get_diagnostics = getattr(self.agent, "get_diagnostics", None)
+        if not callable(get_diagnostics):
+            return None
+        try:
+            diagnostics = get_diagnostics()
+        except Exception as exc:
+            logger.warning("get_diagnostics failed: {}".format(exc))
+            return None
+        if diagnostics is None:
+            return None
+        if action_stats is None or not isinstance(diagnostics, dict):
+            return diagnostics
+
+        diagnostics = copy.deepcopy(diagnostics)
+        diagnostics.setdefault("invalid_action_count", action_stats.get("invalid_action_count", 0))
+        diagnostics.setdefault("nothing_happens_count", action_stats.get("nothing_happens_count", 0))
+        diagnostics.setdefault("check_valid_actions_count", action_stats.get("check_valid_actions_count", 0))
+
+        step_updates = action_stats.get("steps", [])
+        steps = diagnostics.get("steps")
+        if isinstance(steps, list):
+            for idx, step_update in enumerate(step_updates):
+                step_id = step_update.get("step", idx)
+                matched_step = None
+                for step in steps:
+                    if isinstance(step, dict) and step.get("step") == step_id:
+                        matched_step = step
+                        break
+                if matched_step is None and idx < len(steps) and isinstance(steps[idx], dict):
+                    matched_step = steps[idx]
+                if matched_step is not None:
+                    matched_step.update(step_update)
+            diagnostics["steps"] = steps
+        diagnostics["alfworld_action_stats"] = copy.deepcopy(action_stats)
+        return diagnostics
+
     def evaluate_env(self,  index, ob='', examples=None):
 
         init_ob = ob.split('\n')[0]
@@ -113,14 +150,25 @@ class Evalalfworld(BaseTask):
         trajectory = []
         trajectory.append({"Goal":goal, "id":0})
         trajectory.append({"Observation":init_ob, "id":0})   
+        action_stats = {
+            "invalid_action_count": 0,
+            "nothing_happens_count": 0,
+            "check_valid_actions_count": 0,
+            "steps": [],
+        }
         
         for i in range(0, self.max_num_steps):
-            success, action = self.agent.run(init_prompt_dict=init_prompt_dict)
+            success, agent_returned_action = self.agent.run(init_prompt_dict=init_prompt_dict)
             
             if not success:
                 break
             
-            action = self.parseAction(action)
+            action = self.parseAction(agent_returned_action)
+            is_valid_action = action in self.env.get_action_space()
+            if not is_valid_action:
+                action_stats["invalid_action_count"] += 1
+            if action == "check valid actions":
+                action_stats["check_valid_actions_count"] += 1
             if action in self.env.get_action_space():
                 grounding_acc_count += 1.0
             
@@ -128,6 +176,16 @@ class Evalalfworld(BaseTask):
             trajectory.append({"Action":action, "id":i})
             
             observation, reward, done, info = self.env.step(action)
+            nothing_happens = observation.strip() == "Nothing happens."
+            if nothing_happens:
+                action_stats["nothing_happens_count"] += 1
+            action_stats["steps"].append({
+                "step": i,
+                "agent_returned_action": agent_returned_action,
+                "executed_action": action,
+                "is_valid_action": is_valid_action,
+                "nothing_happens": nothing_happens,
+            })
             logger.info("Step {:02} - Observation: {}".format(i, observation))
 
             if "Task accomplished!" in observation and reward < 1.0:
@@ -149,7 +207,8 @@ class Evalalfworld(BaseTask):
                 game_name = self.env.cur_task_name.split('/')[0]
                 env_details = {"task_name": game_name, "goal": self.agent.goal, "difficulty": self.env.difficulty}
                 example_prompt = self._get_example_prompt()
-                self.agentboard.log_example(index, True, reward, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt)
+                agent_diagnostics = self._get_agent_diagnostics(action_stats)
+                self.agentboard.log_example(index, True, reward, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt, agent_diagnostics)
                 self._remember_current_task(index, game_name, done, reward, score_change_record)
 
                 return 1.0, True, grounding_acc_count / (i + 1), score_change_record, i
@@ -162,7 +221,8 @@ class Evalalfworld(BaseTask):
         progress_rate = reward
 
         example_prompt = self._get_example_prompt()
-        self.agentboard.log_example(index, done, progress_rate, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt)
+        agent_diagnostics = self._get_agent_diagnostics(action_stats)
+        self.agentboard.log_example(index, done, progress_rate, grounding_acc_count / (i + 1), score_change_record, env_details, trajectory, example_prompt, agent_diagnostics)
         self._remember_current_task(index, game_name, done, progress_rate, score_change_record)
 
         return progress_rate, done, grounding_acc_count / (i + 1), score_change_record, i
