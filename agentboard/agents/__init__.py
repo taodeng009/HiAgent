@@ -7,8 +7,9 @@ from .cme_final import ContextEfficientAgentV2
 from .plugmem_agent import PlugMemContextEfficientAgent
 from .gmemory_agent import GMemoryContextEfficientAgent
 from .gmemory_vanilla_agent import GMemoryVanillaAgent
+from .split_action_agent import SplitSubgoalActionContextEfficientAgent, GMemoryActionOnlyContextEfficientAgent
 
-__all__ = ["VanillaAgent", "ReactAgent", "CustomReactAgent", "OurAgent", "ContextEfficientAgentV2", "PlugMemContextEfficientAgent", "GMemoryContextEfficientAgent", "GMemoryVanillaAgent"]
+__all__ = ["VanillaAgent", "ReactAgent", "CustomReactAgent", "OurAgent", "ContextEfficientAgentV2", "PlugMemContextEfficientAgent", "GMemoryContextEfficientAgent", "GMemoryVanillaAgent", "SplitSubgoalActionContextEfficientAgent", "GMemoryActionOnlyContextEfficientAgent"]
 
 
 def load_agent(name, config, llm_model):
