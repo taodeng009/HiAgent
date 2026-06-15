@@ -165,6 +165,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "contract": {},
             "task_decision": "disabled",
             "split_failed": False,
+            "instruction_preamble_count": 0,
             "insight_count": 0,
             "kept_count": 0,
             "dropped_count": 0,
@@ -308,13 +309,35 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if current:
             insights.append(" ".join(current).strip())
 
-        insights = [insight for insight in insights if insight]
+        filtered_insights = []
+        preamble_count = 0
+        for insight in insights:
+            if not insight:
+                continue
+            if self._is_instructional_preamble_insight(insight):
+                preamble_count += 1
+                continue
+            filtered_insights.append(insight)
+        insights = filtered_insights
+        self.gmemory_gate_diagnostics["instruction_preamble_count"] = preamble_count
         if not insights and context:
             self.gmemory_gate_diagnostics["split_failed"] = True
             return [context]
         if len(insights) == 1 and insights[0] == context and heading_index >= 0:
             self.gmemory_gate_diagnostics["split_failed"] = True
         return insights
+
+    def _is_instructional_preamble_insight(self, insight: str) -> bool:
+        text = re.sub(r"\s+", " ", (insight or "").strip().lower())
+        if not text:
+            return False
+        preamble_markers = [
+            "the following are insights gathered",
+            "insights gathered during the execution of similar tasks",
+            "you may refer to them during your task execution",
+            "refer to them during your task execution to improve",
+        ]
+        return any(marker in text for marker in preamble_markers)
 
     def _assess_goal_contract_risk(
         self,

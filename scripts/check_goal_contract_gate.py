@@ -134,6 +134,25 @@ def check_insight_split():
     print("PASS insight split")
 
 
+def check_instruction_preamble_filtered():
+    agent = make_agent()
+    agent.goal = "put a clean plate in countertop."
+    prompt = """## Key Insights from Related Tasks
+1. The following are insights gathered during the execution of similar tasks. You may refer to them during your task execution to improve problem-solving accuracy.
+2. Confirm that the intended operation is suitable for the target object before executing, because applying an inappropriate action wastes steps and fails the task.
+3. After an object has been processed (e.g., cleaned), confirm it is in the correct state **and that the processing action succeeded**, because proceeding without verification can leave the object unchanged and the task incomplete.
+"""
+    insights = agent._split_insights(prompt)
+    assert len(insights) == 2
+    assert all("following are insights gathered" not in insight for insight in insights)
+    final_prompt = agent._gate_gmemory_prompt_per_insight(prompt)
+    diagnostics = agent.get_diagnostics()["gmemory_gate"]
+    assert "following are insights gathered" not in final_prompt
+    assert diagnostics["instruction_preamble_count"] == 1
+    assert diagnostics["insight_count"] == 2
+    print("PASS instruction preamble filter")
+
+
 def check_cardinality_mismatch_gate():
     agent = make_agent()
     agent.goal = "put two cd in safe."
@@ -202,6 +221,7 @@ def main():
     check_disabled_path_uses_legacy_filter()
     check_goal_contract_parser()
     check_insight_split()
+    check_instruction_preamble_filtered()
     check_cardinality_mismatch_gate()
     check_over_verification_gate()
     check_reconstruction_skip_limit_and_diagnostics()
