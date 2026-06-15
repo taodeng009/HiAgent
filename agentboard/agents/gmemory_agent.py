@@ -166,6 +166,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "task_decision": "disabled",
             "split_failed": False,
             "instruction_preamble_count": 0,
+            "instruction_preamble_lines": [],
+            "end_delimiter": "",
             "insight_count": 0,
             "kept_count": 0,
             "dropped_count": 0,
@@ -290,11 +292,16 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         insights = []
         current = []
         numbered_or_bulleted = False
+        preamble_lines = []
+        end_delimiter = ""
         item_pattern = re.compile(r"^(?:\d+[\.\)]|[-*])\s+(.*)$")
 
         for line in lines:
             if not line:
                 continue
+            if line == "---":
+                end_delimiter = line
+                break
             match = item_pattern.match(line)
             if match:
                 numbered_or_bulleted = True
@@ -304,40 +311,21 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             elif numbered_or_bulleted and current:
                 current.append(line)
             elif not numbered_or_bulleted:
-                insights.append(line)
+                preamble_lines.append(line)
 
         if current:
             insights.append(" ".join(current).strip())
 
-        filtered_insights = []
-        preamble_count = 0
-        for insight in insights:
-            if not insight:
-                continue
-            if self._is_instructional_preamble_insight(insight):
-                preamble_count += 1
-                continue
-            filtered_insights.append(insight)
-        insights = filtered_insights
-        self.gmemory_gate_diagnostics["instruction_preamble_count"] = preamble_count
+        insights = [insight for insight in insights if insight]
+        self.gmemory_gate_diagnostics["instruction_preamble_count"] = len(preamble_lines)
+        self.gmemory_gate_diagnostics["instruction_preamble_lines"] = preamble_lines
+        self.gmemory_gate_diagnostics["end_delimiter"] = end_delimiter
         if not insights and context:
             self.gmemory_gate_diagnostics["split_failed"] = True
             return [context]
         if len(insights) == 1 and insights[0] == context and heading_index >= 0:
             self.gmemory_gate_diagnostics["split_failed"] = True
         return insights
-
-    def _is_instructional_preamble_insight(self, insight: str) -> bool:
-        text = re.sub(r"\s+", " ", (insight or "").strip().lower())
-        if not text:
-            return False
-        preamble_markers = [
-            "the following are insights gathered",
-            "insights gathered during the execution of similar tasks",
-            "you may refer to them during your task execution",
-            "refer to them during your task execution to improve",
-        ]
-        return any(marker in text for marker in preamble_markers)
 
     def _assess_goal_contract_risk(
         self,
@@ -461,7 +449,14 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if not kept_insights:
             return ""
         lines = ["## Key Insights from Related Tasks"]
+        preamble_lines = self.gmemory_gate_diagnostics.get("instruction_preamble_lines") or []
+        if preamble_lines:
+            lines.extend(preamble_lines)
+            lines.append("")
         lines.extend(f"{idx}. {insight}" for idx, insight in enumerate(kept_insights, start=1))
+        end_delimiter = self.gmemory_gate_diagnostics.get("end_delimiter")
+        if end_delimiter:
+            lines.append(end_delimiter)
         return "\n".join(lines)
 
     def _gate_gmemory_prompt_per_insight(self, memory_prompt: str) -> str:

@@ -138,19 +138,27 @@ def check_instruction_preamble_filtered():
     agent = make_agent()
     agent.goal = "put a clean plate in countertop."
     prompt = """## Key Insights from Related Tasks
-1. The following are insights gathered during the execution of similar tasks. You may refer to them during your task execution to improve problem-solving accuracy.
-2. Confirm that the intended operation is suitable for the target object before executing, because applying an inappropriate action wastes steps and fails the task.
-3. After an object has been processed (e.g., cleaned), confirm it is in the correct state **and that the processing action succeeded**, because proceeding without verification can leave the object unchanged and the task incomplete.
+The following are insights gathered during the execution of similar tasks. You may refer to them during your task execution to improve problem-solving accuracy.
+
+1. Confirm that the intended operation is suitable for the target object before executing, because applying an inappropriate action wastes steps and fails the task.
+2. After an object has been processed (e.g., cleaned), confirm it is in the correct state **and that the processing action succeeded**, because proceeding without verification can leave the object unchanged and the task incomplete.
+3. Open containers before attempting to retrieve items, because items inside are inaccessible while the container is closed.
+---
 """
     insights = agent._split_insights(prompt)
-    assert len(insights) == 2
+    assert len(insights) == 3
     assert all("following are insights gathered" not in insight for insight in insights)
     final_prompt = agent._gate_gmemory_prompt_per_insight(prompt)
     diagnostics = agent.get_diagnostics()["gmemory_gate"]
-    assert "following are insights gathered" not in final_prompt
+    assert "following are insights gathered" in final_prompt
+    assert final_prompt.rstrip().endswith("---")
     assert diagnostics["instruction_preamble_count"] == 1
-    assert diagnostics["insight_count"] == 2
-    print("PASS instruction preamble filter")
+    assert diagnostics["instruction_preamble_lines"] == [
+        "The following are insights gathered during the execution of similar tasks. You may refer to them during your task execution to improve problem-solving accuracy."
+    ]
+    assert diagnostics["end_delimiter"] == "---"
+    assert diagnostics["insight_count"] == 3
+    print("PASS instruction preamble and delimiter preservation")
 
 
 def check_cardinality_mismatch_gate():
