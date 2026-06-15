@@ -1,0 +1,67 @@
+run:
+  max_num_steps: 30
+  num_exam: 134
+  wandb: True
+  project_name: hiagent-h2-goal-contract-gate-c1
+  baseline_dir: data/baseline_results
+  log_path: ${PROJECT_PATH}/results/hiagent_h2_goal_contract_gate_c1
+
+agent:
+  name: GMemoryContextEfficientAgent
+  memory_size: 100
+  need_goal: True
+  use_parser: True
+  enable_retrieve_instruction: False
+  check_actions_prompt_mode: strict
+  gmemory:
+    enabled: True
+    base_url: http://127.0.0.1:8090
+    task_type: alfworld
+    recall_on_reset: True
+    upload_on_finish: false
+    memory_only: True
+    max_context_chars: 5000
+    timeout: 180.0
+    experiment_render_label: C1_GPT_OSS_insight_only_server_side
+    goal_contract_gate:
+      enabled: true
+      mode: per_insight_rule_v1
+      split_mode: c1_insight_lines
+      min_kept_insights: 1
+      max_kept_insights: 3
+
+llm:
+  qwen3_5_4b_vllm_server:
+    name: gpt
+    engine: ./Qwen3.5-4B
+    context_length: 32768
+    use_azure: False
+    temperature: 0.
+    top_p: 1
+    retry_delays: 5
+    max_retry_iters: 3
+    max_tokens: 512
+    stop:
+    use_parser: False
+  gpt-4o:
+    name: gpt
+    engine: gpt-4o
+    context_length: 8192
+    use_azure: False
+    temperature: 0.
+    top_p: 1
+    retry_delays: 20
+    max_retry_iters: 15
+    stop: "\n"
+    use_parser: False
+
+env:
+  alfworld:
+    name: alfworld
+    base_config: ${PROJECT_PATH}/agentboard/environment/alfworld/base_config.yaml
+    split: eval_out_of_distribution
+    batch_size: 1
+    label_path: ${PROJECT_PATH}/data/alfworld/test.jsonl
+    check_inventory: True
+    check_actions: check valid actions
+    init_prompt_path: ${PROJECT_PATH}/agentboard/prompts/VanillaAgent/alfworld_base.json
