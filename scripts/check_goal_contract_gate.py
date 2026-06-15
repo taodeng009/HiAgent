@@ -152,6 +152,8 @@ The following are insights gathered during the execution of similar tasks. You m
     diagnostics = agent.get_diagnostics()["gmemory_gate"]
     assert "following are insights gathered" in final_prompt
     assert final_prompt.rstrip().endswith("---")
+    assert diagnostics["original_memory_prompt"] == prompt
+    assert diagnostics["final_memory_prompt"] == final_prompt
     assert diagnostics["instruction_preamble_count"] == 1
     assert diagnostics["instruction_preamble_lines"] == [
         "The following are insights gathered during the execution of similar tasks. You may refer to them during your task execution to improve problem-solving accuracy."
@@ -213,6 +215,8 @@ def check_reconstruction_skip_limit_and_diagnostics():
     assert limited_prompt == ""
     assert diagnostics["gmemory_gate"]["task_decision"] == "skip"
     assert diagnostics["gmemory_gate"]["kept_count"] == 0
+    assert diagnostics["gmemory_gate"]["original_memory_prompt"] == prompt
+    assert diagnostics["gmemory_gate"]["final_memory_prompt"] == ""
 
     agent.goal = "put a plate in countertop."
     long_prompt = """## Key Insights from Related Tasks
@@ -220,8 +224,11 @@ def check_reconstruction_skip_limit_and_diagnostics():
 """
     gated_prompt = agent._gate_gmemory_prompt_per_insight(long_prompt)
     limited_prompt = agent._limit_gmemory_prompt_chars(gated_prompt)
+    agent.gmemory_gate_diagnostics["final_memory_prompt"] = limited_prompt
+    agent.gmemory_gate_diagnostics["final_memory_chars"] = len(limited_prompt)
     assert gated_prompt.startswith("## Key Insights from Related Tasks")
     assert len(limited_prompt) <= 70
+    assert agent.get_diagnostics()["gmemory_gate"]["final_memory_prompt"] == limited_prompt
     print("PASS reconstruction and diagnostics")
 
 

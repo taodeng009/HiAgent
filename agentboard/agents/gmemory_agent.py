@@ -91,6 +91,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
                 self.gmemory_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
                 self.gmemory_gate_diagnostics["final_memory_chars"] = len(self.gmemory_prompt)
+                self.gmemory_gate_diagnostics["final_memory_prompt"] = self.gmemory_prompt
                 self.gmemory_gate_diagnostics["memory_injected"] = bool(self.gmemory_prompt)
             else:
                 self.gmemory_prompt = self._filter_gmemory_prompt(raw_prompt)
@@ -175,6 +176,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "dropped_insights": [],
             "original_memory_chars": 0,
             "final_memory_chars": 0,
+            "original_memory_prompt": "",
+            "final_memory_prompt": "",
             "memory_injected": False,
         }
 
@@ -467,11 +470,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 "mode": self.gmemory_goal_contract_gate_config.get("mode", "per_insight_rule_v1"),
                 "goal": getattr(self, "goal", None),
                 "original_memory_chars": len(memory_prompt or ""),
+                "original_memory_prompt": memory_prompt or "",
             }
         )
 
         if not memory_prompt:
             self.gmemory_gate_diagnostics["task_decision"] = "skip"
+            self.gmemory_gate_diagnostics["final_memory_prompt"] = ""
             return ""
 
         contract = self._parse_goal_contract(getattr(self, "goal", "") or "")
@@ -507,6 +512,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 "kept_insights": list(kept_insights),
                 "dropped_insights": dropped_insights,
                 "final_memory_chars": len(final_prompt),
+                "final_memory_prompt": final_prompt,
                 "memory_injected": bool(final_prompt),
             }
         )
