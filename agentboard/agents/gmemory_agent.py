@@ -156,10 +156,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _goal_contract_gate_enabled(self) -> bool:
         return bool(self.gmemory_goal_contract_gate_config.get("enabled", False))
 
+    def _goal_contract_gate_mode(self) -> str:
+        return str(self.gmemory_goal_contract_gate_config.get("mode", "per_insight_rule_v1"))
+
     def _empty_gate_diagnostics(self) -> Dict[str, Any]:
         return {
             "enabled": self._goal_contract_gate_enabled() if hasattr(self, "gmemory_goal_contract_gate_config") else False,
-            "mode": self.gmemory_goal_contract_gate_config.get("mode", "per_insight_rule_v1")
+            "mode": self._goal_contract_gate_mode()
             if hasattr(self, "gmemory_goal_contract_gate_config")
             else "per_insight_rule_v1",
             "goal": getattr(self, "goal", None),
@@ -174,6 +177,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "dropped_count": 0,
             "kept_insights": [],
             "dropped_insights": [],
+            "diagnostic_insights": [],
             "original_memory_chars": 0,
             "final_memory_chars": 0,
             "original_memory_prompt": "",
@@ -336,6 +340,16 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         insight: str,
         initial_observation: str = "",
     ) -> Dict[str, Any]:
+        if self._goal_contract_gate_mode() == "per_insight_rule_v2":
+            return self._assess_goal_contract_risk_v2(contract, insight, initial_observation)
+        return self._assess_goal_contract_risk_v1(contract, insight, initial_observation)
+
+    def _assess_goal_contract_risk_v1(
+        self,
+        contract: Dict[str, Any],
+        insight: str,
+        initial_observation: str = "",
+    ) -> Dict[str, Any]:
         text = (insight or "").lower()
         reasons = []
 
@@ -402,7 +416,109 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if self._has_stage_drift(contract, text):
             reasons.append("stage_drift")
 
-        return {"drop": bool(reasons), "reasons": reasons}
+        return {"drop": bool(reasons), "reasons": reasons, "diagnostic_reasons": []}
+
+    def _assess_goal_contract_risk_v2(
+        self,
+        contract: Dict[str, Any],
+        insight: str,
+        initial_observation: str = "",
+    ) -> Dict[str, Any]:
+        text = (insight or "").lower()
+        reasons = []
+        diagnostic_reasons = []
+
+        cardinality_terms = [
+            "two",
+            "both",
+            "second",
+            "another",
+            "repeat",
+            "all",
+            "remaining",
+            "until all",
+            "count",
+        ]
+        if contract.get("count_constraint") in {"two", "multiple"} and not self._contains_any(text, cardinality_terms):
+            reasons.append("cardinality_mismatch")
+
+        intermediate_terms = [
+            "clean",
+            "heat",
+            "hot",
+            "cool",
+            "fridge",
+            "microwave",
+            "sinkbasin",
+            "check",
+            "verify",
+            "ensure",
+            "examine",
+        ]
+        if (
+            contract.get("needs_finalization")
+            and self._contains_any(text, intermediate_terms)
+            and not self._has_final_action_terms(text)
+            and not self._has_state_action_precondition(text, contract)
+        ):
+            reasons.append("finalization_missing")
+
+        if self._has_over_verification_hard_signal(text) or self._has_repeated_probe_risk(text):
+            reasons.append("over_verification_risk")
+
+        if self._has_stage_drift(contract, text):
+            diagnostic_reasons.append("stage_drift")
+
+        return {"drop": bool(reasons), "reasons": reasons, "diagnostic_reasons": diagnostic_reasons}
+
+    def _has_final_action_terms(self, text: str) -> bool:
+        finalization_terms = [
+            "put",
+            "place",
+            "final",
+            "target",
+            "complete",
+            "finish",
+            "use",
+            "examine",
+        ]
+        return self._contains_any(text, finalization_terms) or bool(re.search(r"\b(in|on)\b", text))
+
+    def _has_state_action_precondition(self, text: str, contract: Dict[str, Any]) -> bool:
+        state_requirement = contract.get("state_requirement")
+        if state_requirement == "clean":
+            action_terms = ["clean", "cleaning"]
+        elif state_requirement == "hot":
+            action_terms = ["heat", "heating"]
+        elif state_requirement == "cool":
+            action_terms = ["cool", "cooling"]
+        else:
+            action_terms = ["clean", "cleaning", "heat", "heating", "cool", "cooling"]
+
+        object_available_terms = [
+            "inventory",
+            "in hand",
+            "held",
+            "hold",
+            "holding",
+            "take",
+            "pick up",
+            "pickup",
+            "grab",
+        ]
+        precondition_terms = ["before", "requires", "must", "need", "first"]
+        return (
+            self._contains_any(text, action_terms)
+            and self._contains_any(text, object_available_terms)
+            and self._contains_any(text, precondition_terms)
+        )
+
+    def _has_over_verification_hard_signal(self, text: str) -> bool:
+        return self._contains_any(text, ["repeated", "again", "loop", "nothing happens"])
+
+    def _has_repeated_probe_risk(self, text: str) -> bool:
+        probe_terms = ["check", "examine", "inventory"]
+        return any(len(re.findall(r"\b" + re.escape(term) + r"\b", text)) >= 2 for term in probe_terms)
 
     def _has_stage_drift(self, contract: Dict[str, Any], text: str) -> bool:
         target = (contract.get("target_receptacle_or_tool") or "").lower()
@@ -467,7 +583,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_gate_diagnostics.update(
             {
                 "enabled": True,
-                "mode": self.gmemory_goal_contract_gate_config.get("mode", "per_insight_rule_v1"),
+                "mode": self._goal_contract_gate_mode(),
                 "goal": getattr(self, "goal", None),
                 "original_memory_chars": len(memory_prompt or ""),
                 "original_memory_prompt": memory_prompt or "",
@@ -485,6 +601,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         min_kept = int(self.gmemory_goal_contract_gate_config.get("min_kept_insights", 1))
         kept_insights = []
         dropped_insights = []
+        diagnostic_insights = []
 
         for insight in insights:
             risk = self._assess_goal_contract_risk(
@@ -492,8 +609,16 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 insight=insight,
                 initial_observation=getattr(self, "init_obs", "") or "",
             )
+            if risk.get("diagnostic_reasons"):
+                diagnostic_insights.append({"text": insight, "reasons": risk["diagnostic_reasons"]})
             if risk["drop"]:
-                dropped_insights.append({"text": insight, "reasons": risk["reasons"]})
+                dropped_insights.append(
+                    {
+                        "text": insight,
+                        "reasons": risk["reasons"],
+                        "diagnostic_only_reasons": risk.get("diagnostic_reasons", []),
+                    }
+                )
             else:
                 kept_insights.append(insight)
 
@@ -511,6 +636,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 "dropped_count": len(dropped_insights),
                 "kept_insights": list(kept_insights),
                 "dropped_insights": dropped_insights,
+                "diagnostic_insights": diagnostic_insights,
                 "final_memory_chars": len(final_prompt),
                 "final_memory_prompt": final_prompt,
                 "memory_injected": bool(final_prompt),

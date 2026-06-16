@@ -42,7 +42,7 @@ class FakeLLM:
         return sum(len(message.get("content", "")) for message in messages)
 
 
-def make_agent(max_context_chars=5000):
+def make_agent(max_context_chars=5000, mode="per_insight_rule_v2"):
     return GMemoryContextEfficientAgent(
         llm_model=FakeLLM(),
         need_goal=True,
@@ -53,7 +53,7 @@ def make_agent(max_context_chars=5000):
             "max_context_chars": max_context_chars,
             "goal_contract_gate": {
                 "enabled": True,
-                "mode": "per_insight_rule_v1",
+                "mode": mode,
                 "split_mode": "c1_insight_lines",
                 "min_kept_insights": 1,
                 "max_kept_insights": 3,
@@ -199,6 +199,100 @@ def check_over_verification_gate():
     print("PASS over verification gate")
 
 
+def check_v1_mode_still_uses_original_rule():
+    agent = make_agent(mode="per_insight_rule_v1")
+    contract = agent._parse_goal_contract("put a clean plate in countertop.")
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Ensure the target object is in your inventory before issuing a clean action, because cleaning requires holding it.",
+    )
+    assert risk["drop"]
+    assert "over_verification_risk" in risk["reasons"]
+    print("PASS v1 mode preserves original rule")
+
+
+def check_v2_over_verification_is_tighter():
+    agent = make_agent(mode="per_insight_rule_v2")
+    contract = agent._parse_goal_contract("put a clean plate in countertop.")
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Ensure the target object is in your inventory before issuing a clean action, because cleaning requires holding it.",
+    )
+    assert not risk["drop"]
+    assert risk["reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Verify the object is held before cleaning it.",
+    )
+    assert not risk["drop"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Repeatedly check and examine the object again when nothing happens.",
+    )
+    assert risk["drop"]
+    assert "over_verification_risk" in risk["reasons"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Check the object, then check it again before every step.",
+    )
+    assert risk["drop"]
+    assert "over_verification_risk" in risk["reasons"]
+    print("PASS v2 over verification tightening")
+
+
+def check_v2_finalization_precondition_and_final_terms():
+    agent = make_agent(mode="per_insight_rule_v2")
+    contract = agent._parse_goal_contract("put a hot cup in cabinet.")
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Ensure the target object is in your inventory before issuing a heat action, because heating requires holding the object first.",
+    )
+    assert not risk["drop"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Heat the object, then place it in the target receptacle to complete the goal.",
+    )
+    assert not risk["drop"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Keep checking whether the object is hot before doing anything else.",
+    )
+    assert risk["drop"]
+    assert "finalization_missing" in risk["reasons"]
+    print("PASS v2 finalization tightening")
+
+
+def check_v2_stage_drift_is_diagnostic_only():
+    agent = make_agent(mode="per_insight_rule_v2")
+    contract = {
+        "count_constraint": "one",
+        "state_requirement": "none",
+        "final_action": "unknown",
+        "target_object": "plate",
+        "target_receptacle_or_tool": "countertop",
+        "needs_intermediate_state": False,
+        "needs_finalization": False,
+        "completion_pattern": "unknown",
+    }
+    drift_insight = (
+        "Open the fridge, go to the microwave, check the cabinet, then return to the fridge "
+        "while searching for a different location."
+    )
+    assert agent._has_stage_drift(contract, drift_insight.lower())
+    risk = agent._assess_goal_contract_risk(contract, drift_insight)
+    assert not risk["drop"]
+    assert risk["reasons"] == []
+    assert risk["diagnostic_reasons"] == ["stage_drift"]
+    print("PASS v2 stage drift diagnostic-only")
+
+
 def check_reconstruction_skip_limit_and_diagnostics():
     agent = make_agent(max_context_chars=70)
     agent.goal = "put two cd in safe."
@@ -239,6 +333,10 @@ def main():
     check_instruction_preamble_filtered()
     check_cardinality_mismatch_gate()
     check_over_verification_gate()
+    check_v1_mode_still_uses_original_rule()
+    check_v2_over_verification_is_tighter()
+    check_v2_finalization_precondition_and_final_terms()
+    check_v2_stage_drift_is_diagnostic_only()
     check_reconstruction_skip_limit_and_diagnostics()
 
 
