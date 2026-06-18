@@ -100,31 +100,36 @@ def check_goal_contract_parser():
     agent.set_current_task_type("clean")
     contract = agent._parse_goal_contract("put a clean plate in countertop.")
     assert contract["task_type"] == "clean"
-    assert contract["count_constraint"] == "one"
-    assert contract["state_requirement"] == "clean"
+    assert contract["object"] == "plate"
+    assert contract["target"] == "countertop"
+    assert contract["count"] == "one"
+    assert contract["required_state"] == "clean"
     assert contract["final_action"] == "put"
-    assert contract["completion_pattern"] == "state_change_then_finalize"
-    assert contract["target_object"] == "plate"
-    assert contract["target_receptacle_or_tool"] == "countertop"
+    assert "count_constraint" not in contract
+    assert "state_requirement" not in contract
+    assert "target_object" not in contract
+    assert "target_receptacle_or_tool" not in contract
+    assert "needs_intermediate_state" not in contract
+    assert "needs_finalization" not in contract
+    assert "completion_pattern" not in contract
 
     agent.set_current_task_type("puttwo")
     contract = agent._parse_goal_contract("put two cd in safe.")
     assert contract["task_type"] == "puttwo"
-    assert contract["count_constraint"] == "two"
-    assert contract["state_requirement"] == "none"
+    assert contract["object"] == "cd"
+    assert contract["target"] == "safe"
+    assert contract["count"] == "two"
+    assert contract["required_state"] == "none"
     assert contract["final_action"] == "put"
-    assert contract["completion_pattern"] == "multi_object_place"
-    assert contract["target_object"] == "cd"
-    assert contract["target_receptacle_or_tool"] == "safe"
 
     agent.set_current_task_type("look")
     contract = agent._parse_goal_contract("examine the alarmclock with the desklamp.")
     assert contract["task_type"] == "look"
-    assert contract["count_constraint"] == "one"
+    assert contract["object"] == "alarmclock"
+    assert contract["target"] == "desklamp"
+    assert contract["count"] == "one"
+    assert contract["required_state"] == "none"
     assert contract["final_action"] == "examine"
-    assert contract["completion_pattern"] == "light_or_examine"
-    assert contract["target_object"] == "alarmclock"
-    assert contract["target_receptacle_or_tool"] == "desklamp"
     print("PASS goal contract parser")
 
 
@@ -279,14 +284,12 @@ def check_v2_finalization_precondition_and_final_terms():
 def check_v2_stage_drift_is_diagnostic_only():
     agent = make_agent(mode="per_insight_rule_v2")
     contract = {
-        "count_constraint": "one",
-        "state_requirement": "none",
+        "task_type": "place",
+        "object": "plate",
+        "target": "countertop",
+        "count": "one",
+        "required_state": "none",
         "final_action": "unknown",
-        "target_object": "plate",
-        "target_receptacle_or_tool": "countertop",
-        "needs_intermediate_state": False,
-        "needs_finalization": False,
-        "completion_pattern": "unknown",
     }
     drift_insight = (
         "Open the fridge, go to the microwave, check the cabinet, then return to the fridge "

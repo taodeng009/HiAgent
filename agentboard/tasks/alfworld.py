@@ -109,9 +109,6 @@ class Evalalfworld(BaseTask):
             return diagnostics
 
         diagnostics = copy.deepcopy(diagnostics)
-        diagnostics.setdefault("invalid_action_count", action_stats.get("invalid_action_count", 0))
-        diagnostics.setdefault("nothing_happens_count", action_stats.get("nothing_happens_count", 0))
-        diagnostics.setdefault("check_valid_actions_count", action_stats.get("check_valid_actions_count", 0))
 
         step_updates = action_stats.get("steps", [])
         steps = diagnostics.get("steps")
@@ -128,7 +125,11 @@ class Evalalfworld(BaseTask):
                 if matched_step is not None:
                     matched_step.update(step_update)
             diagnostics["steps"] = steps
-        diagnostics["alfworld_action_stats"] = copy.deepcopy(action_stats)
+        diagnostics["alfworld_action_stats"] = {
+            "invalid_action_count": action_stats.get("invalid_action_count", 0),
+            "nothing_happens_count": action_stats.get("nothing_happens_count", 0),
+            "check_valid_actions_count": action_stats.get("check_valid_actions_count", 0),
+        }
         return diagnostics
 
     def evaluate_env(self,  index, ob='', examples=None, task_type=None):

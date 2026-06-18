@@ -220,20 +220,20 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         lower_goal = goal_text.lower()
 
         if re.search(r"\btwo\b", lower_goal):
-            count_constraint = "two"
+            count = "two"
         elif re.search(r"\b(all|multiple)\b", lower_goal):
-            count_constraint = "multiple"
+            count = "multiple"
         else:
-            count_constraint = "one" if lower_goal else "unknown"
+            count = "one" if lower_goal else "unknown"
 
         if re.search(r"\bclean\b", lower_goal):
-            state_requirement = "clean"
+            required_state = "clean"
         elif re.search(r"\b(hot|heat|heated)\b", lower_goal):
-            state_requirement = "hot"
+            required_state = "hot"
         elif re.search(r"\b(cool|cooled)\b", lower_goal):
-            state_requirement = "cool"
+            required_state = "cool"
         else:
-            state_requirement = "none"
+            required_state = "none"
 
         if re.search(r"\b(put|place)\b", lower_goal):
             final_action = "put"
@@ -246,31 +246,15 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
 
         target_object = self._parse_target_object(lower_goal)
         target_receptacle_or_tool = self._parse_target_receptacle_or_tool(lower_goal, final_action)
-        needs_intermediate_state = state_requirement in {"clean", "hot", "cool"}
-        needs_finalization = final_action in {"put", "examine", "use"}
         task_type = str(getattr(self, "current_task_type", "") or "").strip()
-
-        if count_constraint in {"two", "multiple"}:
-            completion_pattern = "multi_object_place"
-        elif needs_intermediate_state and final_action == "put":
-            completion_pattern = "state_change_then_finalize"
-        elif final_action == "put":
-            completion_pattern = "direct_place"
-        elif final_action in {"examine", "use"}:
-            completion_pattern = "light_or_examine"
-        else:
-            completion_pattern = "unknown"
 
         return {
             "task_type": task_type,
-            "count_constraint": count_constraint,
-            "state_requirement": state_requirement,
+            "object": target_object,
+            "target": target_receptacle_or_tool,
+            "count": count,
+            "required_state": required_state,
             "final_action": final_action,
-            "target_object": target_object,
-            "target_receptacle_or_tool": target_receptacle_or_tool,
-            "needs_intermediate_state": needs_intermediate_state,
-            "needs_finalization": needs_finalization,
-            "completion_pattern": completion_pattern,
         }
 
     def _parse_target_object(self, lower_goal: str) -> str:
@@ -380,7 +364,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "until all",
             "count",
         ]
-        if contract.get("count_constraint") in {"two", "multiple"} and not self._contains_any(text, cardinality_terms):
+        if contract.get("count") in {"two", "multiple"} and not self._contains_any(text, cardinality_terms):
             reasons.append("cardinality_mismatch")
 
         intermediate_terms = [
@@ -408,7 +392,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         ]
         has_finalization = self._contains_any(text, finalization_terms) or bool(re.search(r"\b(in|on)\b", text))
         if (
-            contract.get("needs_finalization")
+            self._contract_needs_finalization(contract)
             and self._contains_any(text, intermediate_terms)
             and not has_finalization
         ):
@@ -455,7 +439,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "until all",
             "count",
         ]
-        if contract.get("count_constraint") in {"two", "multiple"} and not self._contains_any(text, cardinality_terms):
+        if contract.get("count") in {"two", "multiple"} and not self._contains_any(text, cardinality_terms):
             reasons.append("cardinality_mismatch")
 
         intermediate_terms = [
@@ -472,7 +456,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "examine",
         ]
         if (
-            contract.get("needs_finalization")
+            self._contract_needs_finalization(contract)
             and self._contains_any(text, intermediate_terms)
             and not self._has_final_action_terms(text)
             and not self._has_state_action_precondition(text, contract)
@@ -501,12 +485,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         return self._contains_any(text, finalization_terms) or bool(re.search(r"\b(in|on)\b", text))
 
     def _has_state_action_precondition(self, text: str, contract: Dict[str, Any]) -> bool:
-        state_requirement = contract.get("state_requirement")
-        if state_requirement == "clean":
+        required_state = contract.get("required_state")
+        if required_state == "clean":
             action_terms = ["clean", "cleaning"]
-        elif state_requirement == "hot":
+        elif required_state == "hot":
             action_terms = ["heat", "heating"]
-        elif state_requirement == "cool":
+        elif required_state == "cool":
             action_terms = ["cool", "cooling"]
         else:
             action_terms = ["clean", "cleaning", "heat", "heating", "cool", "cooling"]
@@ -536,8 +520,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         probe_terms = ["check", "examine", "inventory"]
         return any(len(re.findall(r"\b" + re.escape(term) + r"\b", text)) >= 2 for term in probe_terms)
 
+    def _contract_needs_finalization(self, contract: Dict[str, Any]) -> bool:
+        return contract.get("final_action") in {"put", "examine", "use"}
+
     def _has_stage_drift(self, contract: Dict[str, Any], text: str) -> bool:
-        target = (contract.get("target_receptacle_or_tool") or "").lower()
+        target = (contract.get("target") or "").lower()
         target_absent = bool(target) and target not in text
         tool_location_terms = [
             "fridge",
