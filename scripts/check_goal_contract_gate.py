@@ -361,6 +361,105 @@ The following are insights gathered during the execution of similar tasks.
     print("PASS diagnostics-only preserves prompt exactly")
 
 
+def check_v3_place_state_workflow_pollution():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "place",
+        "object": "plate",
+        "target": "countertop",
+        "count": "one",
+        "required_state": "none",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Use the fridge or microwave to process the object, then verify device readiness.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["place_state_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Find the plate, pick it up, and put it on the countertop.",
+    )
+    assert not risk["drop"]
+    print("PASS v3 place state workflow pollution")
+
+
+def check_v3_puttwo_single_object_completion_boundary():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "puttwo",
+        "object": "soapbar",
+        "target": "cabinet",
+        "count": "two",
+        "required_state": "none",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Find one object and put it in the target, because this completes the immediate goal.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["puttwo_cardinality_mismatch"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Always return to the target receptacle after picking up an object.",
+    )
+    assert not risk["drop"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "After placing the first object, search for the second remaining object and return to the target container.",
+    )
+    assert not risk["drop"]
+    print("PASS v3 puttwo single-object completion boundary")
+
+
+def check_v3_obvious_verification_loop_risk():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "place",
+        "object": "plate",
+        "target": "countertop",
+        "count": "one",
+        "required_state": "none",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Repeatedly check and examine the object again when nothing happens.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["obvious_verification_loop_risk"]
+    print("PASS v3 obvious verification loop risk")
+
+
+def check_v3_state_finalization_is_diagnostic_only():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "clean",
+        "object": "bowl",
+        "target": "cabinet",
+        "count": "one",
+        "required_state": "clean",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Keep checking whether the bowl is clean before doing anything else.",
+    )
+    assert not risk["drop"]
+    assert risk["reasons"] == []
+    assert risk["diagnostic_reasons"] == ["missing_finalization_signal"]
+    print("PASS v3 state finalization diagnostic-only")
+
+
 def main():
     check_disabled_path_uses_legacy_filter()
     check_goal_contract_parser()
@@ -374,6 +473,10 @@ def main():
     check_v2_stage_drift_is_diagnostic_only()
     check_reconstruction_skip_limit_and_diagnostics()
     check_diagnostics_only_preserves_prompt_exactly()
+    check_v3_place_state_workflow_pollution()
+    check_v3_puttwo_single_object_completion_boundary()
+    check_v3_obvious_verification_loop_risk()
+    check_v3_state_finalization_is_diagnostic_only()
 
 
 if __name__ == "__main__":

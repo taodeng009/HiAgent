@@ -340,7 +340,10 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         insight: str,
         initial_observation: str = "",
     ) -> Dict[str, Any]:
-        if self._goal_contract_gate_mode() == "per_insight_rule_v2":
+        mode = self._goal_contract_gate_mode()
+        if mode == "per_insight_task_type_rule_v3":
+            return self._assess_goal_contract_risk_v3(contract, insight, initial_observation)
+        if mode == "per_insight_rule_v2":
             return self._assess_goal_contract_risk_v2(contract, insight, initial_observation)
         return self._assess_goal_contract_risk_v1(contract, insight, initial_observation)
 
@@ -470,6 +473,123 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             diagnostic_reasons.append("stage_drift")
 
         return {"drop": bool(reasons), "reasons": reasons, "diagnostic_reasons": diagnostic_reasons}
+
+    def _assess_goal_contract_risk_v3(
+        self,
+        contract: Dict[str, Any],
+        insight: str,
+        initial_observation: str = "",
+    ) -> Dict[str, Any]:
+        text = (insight or "").lower()
+        reasons = []
+        diagnostic_reasons = []
+
+        if self._has_place_state_workflow_pollution(contract, text):
+            reasons.append("place_state_workflow_pollution")
+
+        if self._has_puttwo_single_object_completion(contract, text):
+            reasons.append("puttwo_cardinality_mismatch")
+
+        if self._has_obvious_verification_loop_risk(text):
+            reasons.append("obvious_verification_loop_risk")
+
+        if self._has_clean_heat_cool_missing_finalization_diagnostic(contract, text):
+            diagnostic_reasons.append("missing_finalization_signal")
+
+        return {"drop": bool(reasons), "reasons": reasons, "diagnostic_reasons": diagnostic_reasons}
+
+    def _has_place_state_workflow_pollution(self, contract: Dict[str, Any], text: str) -> bool:
+        if contract.get("task_type") != "place":
+            return False
+        state_workflow_terms = [
+            "clean",
+            "cleaning",
+            "heat",
+            "heating",
+            "hot",
+            "cool",
+            "cooling",
+            "cooled",
+            "fridge",
+            "microwave",
+            "sinkbasin",
+            "state change",
+            "processed",
+            "processing",
+            "device readiness",
+            "appliance",
+        ]
+        if not self._contains_any(text, state_workflow_terms):
+            return False
+        target_object = (contract.get("object") or "").lower()
+        target_receptacle = (contract.get("target") or "").lower()
+        supports_current_place_task = bool(target_object and target_object in text) or bool(
+            target_receptacle and target_receptacle in text
+        )
+        return not supports_current_place_task
+
+    def _has_puttwo_single_object_completion(self, contract: Dict[str, Any], text: str) -> bool:
+        if contract.get("task_type") != "puttwo" and contract.get("count") not in {"two", "multiple"}:
+            return False
+        single_object_markers = [
+            r"\bone object\b",
+            r"\ba single object\b",
+            r"\bthe object\b",
+            r"\bthe item\b",
+            r"\bone item\b",
+            r"\bit\b",
+        ]
+        completion_markers = [
+            r"\btask is complete\b",
+            r"\bcompletes? the (?:task|goal|immediate goal)\b",
+            r"\bfinish(?:es)? the (?:task|goal)\b",
+            r"\bto complete the (?:task|goal|immediate goal)\b",
+            r"\bthis completes\b",
+            r"\bthis finishes\b",
+        ]
+        placement_markers = [
+            r"\bput\b",
+            r"\bplace\b",
+            r"\bplacing\b",
+            r"\bplaced\b",
+            r"\bin the target\b",
+            r"\bon the target\b",
+            r"\btarget receptacle\b",
+        ]
+        has_single_object = any(re.search(pattern, text) for pattern in single_object_markers)
+        has_completion = any(re.search(pattern, text) for pattern in completion_markers)
+        has_placement = any(re.search(pattern, text) for pattern in placement_markers)
+        return has_single_object and has_completion and has_placement
+
+    def _has_obvious_verification_loop_risk(self, text: str) -> bool:
+        if self._contains_any(text, ["repeated", "repeatedly", "again", "loop", "nothing happens"]):
+            return True
+        probe_terms = ["check", "examine", "inventory"]
+        return any(len(re.findall(r"\b" + re.escape(term) + r"\b", text)) >= 2 for term in probe_terms)
+
+    def _has_clean_heat_cool_missing_finalization_diagnostic(self, contract: Dict[str, Any], text: str) -> bool:
+        if contract.get("task_type") not in {"clean", "heat", "cool"}:
+            return False
+        intermediate_terms = [
+            "clean",
+            "cleaning",
+            "heat",
+            "heating",
+            "hot",
+            "cool",
+            "cooling",
+            "fridge",
+            "microwave",
+            "sinkbasin",
+            "check",
+            "verify",
+            "ensure",
+        ]
+        return (
+            self._contains_any(text, intermediate_terms)
+            and not self._has_final_action_terms(text)
+            and not self._has_state_action_precondition(text, contract)
+        )
 
     def _has_final_action_terms(self, text: str) -> bool:
         finalization_terms = [

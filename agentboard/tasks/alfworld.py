@@ -22,6 +22,11 @@ prefixes = {
     'pick_two_obj': 'puttwo'
 }
 
+TASK_TYPE_ALIASES = {
+    "put": "place",
+    "examine": "look",
+}
+
 
 
 @registry.register_task("alfworld")
@@ -52,11 +57,68 @@ class Evalalfworld(BaseTask):
         self.env_cfg = env_config
         self.max_num_steps = max_num_steps
         self.num_exams = num_exams
-        
+        self.target_task_types, self.target_task_limits = self._parse_target_task_filter(env_config)
+
         self.baseline_dir = baseline_dir
-        
-        
+
         self.agentboard = TaskLogger(task_name="alfworld", log_path=log_path, max_num_steps=self.max_num_steps, baseline_dir=self.baseline_dir)
+
+    def _parse_target_task_filter(self, env_config):
+        if not isinstance(env_config, dict):
+            return set(), {}
+
+        raw_task_types = env_config.get("target_task_types") or []
+        if isinstance(raw_task_types, str):
+            raw_task_types = [item.strip() for item in raw_task_types.split(",")]
+        target_task_types = {
+            self._normalize_task_type(task_type)
+            for task_type in raw_task_types
+            if task_type
+        }
+
+        raw_limits = env_config.get("target_task_limits") or {}
+        target_task_limits = {}
+        if isinstance(raw_limits, dict):
+            for task_type, limit in raw_limits.items():
+                try:
+                    target_task_limits[self._normalize_task_type(task_type)] = int(limit)
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring invalid ALFWorld target_task_limits entry: {}={}".format(task_type, limit))
+
+        return target_task_types, target_task_limits
+
+    @staticmethod
+    def _normalize_task_type(task_type):
+        return TASK_TYPE_ALIASES.get(str(task_type).strip(), str(task_type).strip())
+
+    def _match_task_prefix(self, task_name):
+        for prompt_key, prompt_task_type in prefixes.items():
+            if task_name.startswith(prompt_key):
+                return prompt_task_type, self._normalize_task_type(prompt_task_type)
+        return None, None
+
+    def _should_skip_target_task(self, task_type, target_task_counts):
+        # Optional targeted ablation filter. When target_task_types is empty,
+        # ALFWorld keeps the original full-run behavior.
+        if self.target_task_types and task_type not in self.target_task_types:
+            return True
+
+        # Optional per-type cap for quick targeted comparisons, e.g.
+        # place=10, puttwo=17, look=10. Missing limits mean "no cap".
+        task_limit = self.target_task_limits.get(task_type)
+        if task_limit is not None and target_task_counts.get(task_type, 0) >= task_limit:
+            return True
+
+        return False
+
+    def _target_limits_reached(self, target_task_counts):
+        if not self.target_task_types or not self.target_task_limits:
+            return False
+        for task_type in self.target_task_types:
+            task_limit = self.target_task_limits.get(task_type)
+            if task_limit is None or target_task_counts.get(task_type, 0) < task_limit:
+                return False
+        return True
 
     def parseAction(self, action):
         action = action.strip()
@@ -240,6 +302,7 @@ class Evalalfworld(BaseTask):
         grounding_accs = []
         srs = []
         difficulties = []
+        target_task_counts = {}
 
         for id in range(self.num_exams):
 
@@ -247,30 +310,37 @@ class Evalalfworld(BaseTask):
             ob = '\n'.join(ob[0].split('\n\n')[1:])
             name = '/'.join(info['extra.gamefile'][0].split('/')[-3:-1])
             #sub_goal = selected_obs[name]
-            difficulties.append(self.env.difficulty)
 
-            for i, (k, v) in enumerate(prefixes.items()):
-                if name.startswith(k):
-                    examples = "".join(self.prompts['examples'][v])
-                    task_type = {
-                        "put": "place",
-                        "examine": "look",
-                    }.get(v, v)
-                    score, is_done, grounding_acc, score_change_record, steps = self.evaluate_env(
-                        ob=ob,
-                        examples=examples,
-                        index=id,
-                        task_type=task_type,
-                    )
-                    if is_done:
-                        srs.append(1.0)
-                    else:
-                        srs.append(0.0)
-                    scores.append(score)
-                    grounding_accs.append(grounding_acc)
-                    score_state_records.append(score_change_record)
-                    #print(f"the {i}th task: reward: {score}")
-                    logger.finish("Example {} | Success: {} , Progress Rate: {} , Steps: {}\n".format(id, is_done, score, steps))
+            prompt_task_type, task_type = self._match_task_prefix(name)
+            if task_type is None:
+                continue
+            if self._should_skip_target_task(task_type, target_task_counts):
+                continue
+
+            examples = "".join(self.prompts['examples'][prompt_task_type])
+            score, is_done, grounding_acc, score_change_record, steps = self.evaluate_env(
+                ob=ob,
+                examples=examples,
+                index=id,
+                task_type=task_type,
+            )
+            target_task_counts[task_type] = target_task_counts.get(task_type, 0) + 1
+            difficulties.append(self.env.difficulty)
+            if is_done:
+                srs.append(1.0)
+            else:
+                srs.append(0.0)
+            scores.append(score)
+            grounding_accs.append(grounding_acc)
+            score_state_records.append(score_change_record)
+            #print(f"the {i}th task: reward: {score}")
+            logger.finish("Example {} | Success: {} , Progress Rate: {} , Steps: {}\n".format(id, is_done, score, steps))
+
+            if self._target_limits_reached(target_task_counts):
+                break
+
+        if not srs:
+            raise RuntimeError("No ALFWorld tasks were evaluated; check target_task_types and target_task_limits.")
 
         sr = sum(srs) * 1.0 / len(srs)
         pr = sum(scores) * 1.0 / len(scores)
