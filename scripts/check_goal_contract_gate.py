@@ -42,7 +42,7 @@ class FakeLLM:
         return sum(len(message.get("content", "")) for message in messages)
 
 
-def make_agent(max_context_chars=5000, mode="per_insight_rule_v2"):
+def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_only=False):
     return GMemoryContextEfficientAgent(
         llm_model=FakeLLM(),
         need_goal=True,
@@ -57,6 +57,7 @@ def make_agent(max_context_chars=5000, mode="per_insight_rule_v2"):
                 "split_mode": "c1_insight_lines",
                 "min_kept_insights": 1,
                 "max_kept_insights": 3,
+                "diagnostics_only": diagnostics_only,
             },
         },
     )
@@ -96,7 +97,9 @@ Ignore this section.
 def check_goal_contract_parser():
     agent = make_agent()
 
+    agent.set_current_task_type("clean")
     contract = agent._parse_goal_contract("put a clean plate in countertop.")
+    assert contract["task_type"] == "clean"
     assert contract["count_constraint"] == "one"
     assert contract["state_requirement"] == "clean"
     assert contract["final_action"] == "put"
@@ -104,7 +107,9 @@ def check_goal_contract_parser():
     assert contract["target_object"] == "plate"
     assert contract["target_receptacle_or_tool"] == "countertop"
 
+    agent.set_current_task_type("puttwo")
     contract = agent._parse_goal_contract("put two cd in safe.")
+    assert contract["task_type"] == "puttwo"
     assert contract["count_constraint"] == "two"
     assert contract["state_requirement"] == "none"
     assert contract["final_action"] == "put"
@@ -112,7 +117,9 @@ def check_goal_contract_parser():
     assert contract["target_object"] == "cd"
     assert contract["target_receptacle_or_tool"] == "safe"
 
+    agent.set_current_task_type("look")
     contract = agent._parse_goal_contract("examine the alarmclock with the desklamp.")
+    assert contract["task_type"] == "look"
     assert contract["count_constraint"] == "one"
     assert contract["final_action"] == "examine"
     assert contract["completion_pattern"] == "light_or_examine"
@@ -326,6 +333,31 @@ def check_reconstruction_skip_limit_and_diagnostics():
     print("PASS reconstruction and diagnostics")
 
 
+def check_diagnostics_only_preserves_prompt_exactly():
+    agent = make_agent(mode="per_insight_rule_v2", diagnostics_only=True)
+    agent.set_current_task_type("puttwo")
+    agent.goal = "put two cd in safe."
+    agent.init_obs = "You are in the middle of a room."
+    prompt = """## Key Insights from Related Tasks
+The following are insights gathered during the execution of similar tasks.
+
+1. Find one object and put it in the target, because this completes the immediate goal.
+2. Repeat for the second object and count both placements.
+---
+"""
+    returned_prompt = agent._diagnose_gmemory_prompt_per_insight(prompt)
+    diagnostics = agent.get_diagnostics()["gmemory_gate"]
+    assert returned_prompt == prompt
+    assert diagnostics["diagnostics_only"] is True
+    assert diagnostics["task_decision"] == "diagnostics_only"
+    assert diagnostics["contract"]["task_type"] == "puttwo"
+    assert diagnostics["original_memory_prompt"] == prompt
+    assert diagnostics["final_memory_prompt"] == prompt
+    assert diagnostics["dropped_count"] == 1
+    assert diagnostics["dropped_insights"][0]["reasons"] == ["cardinality_mismatch"]
+    print("PASS diagnostics-only preserves prompt exactly")
+
+
 def main():
     check_disabled_path_uses_legacy_filter()
     check_goal_contract_parser()
@@ -338,6 +370,7 @@ def main():
     check_v2_finalization_precondition_and_final_terms()
     check_v2_stage_drift_is_diagnostic_only()
     check_reconstruction_skip_limit_and_diagnostics()
+    check_diagnostics_only_preserves_prompt_exactly()
 
 
 if __name__ == "__main__":

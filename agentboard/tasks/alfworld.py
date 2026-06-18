@@ -131,11 +131,16 @@ class Evalalfworld(BaseTask):
         diagnostics["alfworld_action_stats"] = copy.deepcopy(action_stats)
         return diagnostics
 
-    def evaluate_env(self,  index, ob='', examples=None):
+    def evaluate_env(self,  index, ob='', examples=None, task_type=None):
 
         init_ob = ob.split('\n')[0]
         goal = ob.split('\n')[1].split("Your task is to:")[1].strip()
-        
+
+        if task_type is not None:
+            if hasattr(self.agent, "set_current_task_type"):
+                self.agent.set_current_task_type(task_type)
+            else:
+                self.agent.current_task_type = task_type
         self.agent.reset(goal=goal, init_obs=init_ob)
         logger.goal("Example {} | Goal: {}".format(index, self.agent.goal))
         init_prompt_dict = copy.deepcopy(self.prompts)
@@ -246,7 +251,16 @@ class Evalalfworld(BaseTask):
             for i, (k, v) in enumerate(prefixes.items()):
                 if name.startswith(k):
                     examples = "".join(self.prompts['examples'][v])
-                    score, is_done, grounding_acc, score_change_record, steps = self.evaluate_env(ob=ob, examples=examples, index=id)
+                    task_type = {
+                        "put": "place",
+                        "examine": "look",
+                    }.get(v, v)
+                    score, is_done, grounding_acc, score_change_record, steps = self.evaluate_env(
+                        ob=ob,
+                        examples=examples,
+                        index=id,
+                        task_type=task_type,
+                    )
                     if is_done:
                         srs.append(1.0)
                     else:

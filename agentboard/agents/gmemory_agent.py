@@ -56,9 +56,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
         self.gmemory_memory_only = bool(self.gmemory_config.get("memory_only", False))
         self.gmemory_goal_contract_gate_config = self.gmemory_config.get("goal_contract_gate", {}) or {}
+        self.current_task_type = ""
         self.gmemory_prompt = ""
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
         self.gmemory_client = self._build_gmemory_client()
+
+    def set_current_task_type(self, task_type: Optional[str]) -> None:
+        self.current_task_type = str(task_type or "").strip()
 
     def _build_gmemory_client(self) -> Optional[GMemoryClient]:
         if not self.gmemory_enabled:
@@ -88,8 +92,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             raw_prompt = response.get("memory_prompt", "")
             if gate_enabled:
                 prepared_prompt = self._prepare_gmemory_prompt_for_gate(raw_prompt)
-                gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
-                self.gmemory_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
+                if self._goal_contract_gate_diagnostics_only():
+                    self._diagnose_gmemory_prompt_per_insight(prepared_prompt)
+                    self.gmemory_prompt = self._limit_gmemory_prompt_chars(prepared_prompt)
+                else:
+                    gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
+                    self.gmemory_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
                 self.gmemory_gate_diagnostics["final_memory_chars"] = len(self.gmemory_prompt)
                 self.gmemory_gate_diagnostics["final_memory_prompt"] = self.gmemory_prompt
                 self.gmemory_gate_diagnostics["memory_injected"] = bool(self.gmemory_prompt)
@@ -159,12 +167,18 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _goal_contract_gate_mode(self) -> str:
         return str(self.gmemory_goal_contract_gate_config.get("mode", "per_insight_rule_v1"))
 
+    def _goal_contract_gate_diagnostics_only(self) -> bool:
+        return bool(self.gmemory_goal_contract_gate_config.get("diagnostics_only", False))
+
     def _empty_gate_diagnostics(self) -> Dict[str, Any]:
         return {
             "enabled": self._goal_contract_gate_enabled() if hasattr(self, "gmemory_goal_contract_gate_config") else False,
             "mode": self._goal_contract_gate_mode()
             if hasattr(self, "gmemory_goal_contract_gate_config")
             else "per_insight_rule_v1",
+            "diagnostics_only": self._goal_contract_gate_diagnostics_only()
+            if hasattr(self, "gmemory_goal_contract_gate_config")
+            else False,
             "goal": getattr(self, "goal", None),
             "contract": {},
             "task_decision": "disabled",
@@ -234,6 +248,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         target_receptacle_or_tool = self._parse_target_receptacle_or_tool(lower_goal, final_action)
         needs_intermediate_state = state_requirement in {"clean", "hot", "cool"}
         needs_finalization = final_action in {"put", "examine", "use"}
+        task_type = str(getattr(self, "current_task_type", "") or "").strip()
 
         if count_constraint in {"two", "multiple"}:
             completion_pattern = "multi_object_place"
@@ -247,6 +262,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             completion_pattern = "unknown"
 
         return {
+            "task_type": task_type,
             "count_constraint": count_constraint,
             "state_requirement": state_requirement,
             "final_action": final_action,
@@ -577,6 +593,66 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if end_delimiter:
             lines.append(end_delimiter)
         return "\n".join(lines)
+
+    def _diagnose_gmemory_prompt_per_insight(self, memory_prompt: str) -> str:
+        self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
+        self.gmemory_gate_diagnostics.update(
+            {
+                "enabled": True,
+                "mode": self._goal_contract_gate_mode(),
+                "diagnostics_only": True,
+                "goal": getattr(self, "goal", None),
+                "original_memory_chars": len(memory_prompt or ""),
+                "original_memory_prompt": memory_prompt or "",
+            }
+        )
+
+        if not memory_prompt:
+            self.gmemory_gate_diagnostics["task_decision"] = "skip"
+            self.gmemory_gate_diagnostics["final_memory_prompt"] = ""
+            return ""
+
+        contract = self._parse_goal_contract(getattr(self, "goal", "") or "")
+        insights = self._split_insights(memory_prompt)
+        kept_insights = []
+        dropped_insights = []
+        diagnostic_insights = []
+
+        for insight in insights:
+            risk = self._assess_goal_contract_risk(
+                contract=contract,
+                insight=insight,
+                initial_observation=getattr(self, "init_obs", "") or "",
+            )
+            if risk.get("diagnostic_reasons"):
+                diagnostic_insights.append({"text": insight, "reasons": risk["diagnostic_reasons"]})
+            if risk["drop"]:
+                dropped_insights.append(
+                    {
+                        "text": insight,
+                        "reasons": risk["reasons"],
+                        "diagnostic_only_reasons": risk.get("diagnostic_reasons", []),
+                    }
+                )
+            else:
+                kept_insights.append(insight)
+
+        self.gmemory_gate_diagnostics.update(
+            {
+                "contract": contract,
+                "task_decision": "diagnostics_only",
+                "insight_count": len(insights),
+                "kept_count": len(kept_insights),
+                "dropped_count": len(dropped_insights),
+                "kept_insights": list(kept_insights),
+                "dropped_insights": dropped_insights,
+                "diagnostic_insights": diagnostic_insights,
+                "final_memory_chars": len(memory_prompt),
+                "final_memory_prompt": memory_prompt,
+                "memory_injected": bool(memory_prompt),
+            }
+        )
+        return memory_prompt
 
     def _gate_gmemory_prompt_per_insight(self, memory_prompt: str) -> str:
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
