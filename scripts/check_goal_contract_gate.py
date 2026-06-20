@@ -488,6 +488,75 @@ def check_v3_obvious_verification_loop_risk():
     print("PASS v3 obvious verification loop risk")
 
 
+def check_v3_broad_over_verification_gate():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "place",
+        "object": "plate",
+        "target": "countertop",
+        "count": "one",
+        "required_state": "none",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Before each action, verify the object location, readiness, and state.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["broad_over_verification_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "After every step, confirm the state and check preconditions.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["broad_over_verification_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Before each action, verify preconditions, then take the object and put it in the target.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == ["broad_over_verification_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "After each action, confirm success, then return to the target receptacle.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == ["broad_over_verification_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Verify that the object is soapbar, not soapbottle.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        {
+            "task_type": "heat",
+            "object": "mug",
+            "target": "countertop",
+            "count": "one",
+            "required_state": "hot",
+            "final_action": "put",
+        },
+        "Close the microwave before heating.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Check valid actions after one failed action.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+    print("PASS v3 broad over-verification gate")
+
+
 def check_v3_state_finalization_is_diagnostic_only():
     agent = make_agent(mode="per_insight_task_type_rule_v3")
     contract = {
@@ -595,6 +664,7 @@ def main():
     check_v3_puttwo_single_object_completion_boundary()
     check_v3_puttwo_cardinality_tightening()
     check_v3_obvious_verification_loop_risk()
+    check_v3_broad_over_verification_gate()
     check_v3_state_finalization_is_diagnostic_only()
     check_v3_state_action_refinement()
 

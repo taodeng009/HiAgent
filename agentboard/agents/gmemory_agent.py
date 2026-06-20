@@ -502,6 +502,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if self._has_obvious_verification_loop_risk(text):
             reasons.append("obvious_verification_loop_risk")
 
+        broad_over_verification = self._assess_broad_over_verification_risk(text)
+        if broad_over_verification == "drop":
+            reasons.append("broad_over_verification_workflow_pollution")
+        elif broad_over_verification == "diagnostic":
+            diagnostic_reasons.append("broad_over_verification_workflow_pollution")
+
         if self._has_clean_heat_cool_missing_finalization_signal(contract, text):
             if self._goal_contract_gate_state_finalization_action() == "drop":
                 reasons.append("missing_finalization_signal")
@@ -666,6 +672,52 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             return True
         probe_terms = ["check", "examine", "inventory"]
         return any(len(re.findall(r"\b" + re.escape(term) + r"\b", text)) >= 2 for term in probe_terms)
+
+    def _assess_broad_over_verification_risk(self, text: str) -> str:
+        if not self._has_broad_over_verification_scope(text) or not self._has_verification_verb(text):
+            return "keep"
+        if self._has_concrete_task_advancing_action(text):
+            return "diagnostic"
+        return "drop"
+
+    def _has_broad_over_verification_scope(self, text: str) -> bool:
+        patterns = [
+            r"\bbefore (?:each|every) action\b",
+            r"\bafter (?:each|every) action\b",
+            r"\bbefore (?:each|every) step\b",
+            r"\bafter (?:each|every) step\b",
+            r"\bat (?:each|every) step\b",
+            r"\bevery step\b",
+            r"\beach step\b",
+        ]
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _has_verification_verb(self, text: str) -> bool:
+        return self._contains_any(text, ["verify", "confirm", "check", "ensure"])
+
+    def _has_concrete_task_advancing_action(self, text: str) -> bool:
+        concrete_terms = [
+            "take",
+            "pick up",
+            "pickup",
+            "put",
+            "place",
+            "placing",
+            "placed",
+            "open",
+            "close",
+            "clean",
+            "heat",
+            "cool",
+            "return",
+            "go back",
+            "search",
+            "find",
+            "retrieve",
+            "store",
+            "move",
+        ]
+        return self._contains_any(text, concrete_terms) or bool(re.search(r"\bexamine\b.+\bwith\b", text))
 
     def _has_clean_heat_cool_missing_finalization_signal(self, contract: Dict[str, Any], text: str) -> bool:
         if contract.get("task_type") not in {"clean", "heat", "cool"}:
