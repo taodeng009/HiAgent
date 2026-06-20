@@ -713,9 +713,20 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "go back",
             "search",
             "find",
+            "locate",
+            "locates",
+            "acquire",
+            "acquires",
+            "select",
+            "selects",
+            "apply",
+            "applies",
             "retrieve",
+            "retrieves",
             "store",
+            "stores",
             "move",
+            "moves",
         ]
         return self._contains_any(text, concrete_terms) or bool(re.search(r"\bexamine\b.+\bwith\b", text))
 

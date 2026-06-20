@@ -528,6 +528,25 @@ def check_v3_broad_over_verification_gate():
     assert risk["diagnostic_reasons"] == ["broad_over_verification_workflow_pollution"]
 
     risk = agent._assess_goal_contract_risk(
+        {
+            "task_type": "look",
+            "object": "plate",
+            "target": "desklamp",
+            "count": "one",
+            "required_state": "none",
+            "final_action": "examine",
+        },
+        (
+            "Ensure each action uses the exact valid-action phrasing, selects the correct object, "
+            "applies any required transformation at the appropriate appliance, verifies the resulting "
+            "property, and then moves the object to its final location, confirming the state change "
+            "after every step."
+        ),
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == ["broad_over_verification_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
         contract,
         "Verify that the object is soapbar, not soapbottle.",
     )
