@@ -490,6 +490,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if self._has_puttwo_single_object_completion(contract, text):
             reasons.append("puttwo_cardinality_mismatch")
 
+        if self._has_puttwo_state_workflow_pollution(contract, text):
+            reasons.append("puttwo_state_workflow_pollution")
+
+        if self._has_puttwo_weak_cardinality_signal(contract, text):
+            reasons.append("puttwo_weak_cardinality_signal")
+
         if self._has_obvious_verification_loop_risk(text):
             reasons.append("obvious_verification_loop_risk")
 
@@ -560,6 +566,94 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         has_completion = any(re.search(pattern, text) for pattern in completion_markers)
         has_placement = any(re.search(pattern, text) for pattern in placement_markers)
         return has_single_object and has_completion and has_placement
+
+    def _is_puttwo_contract(self, contract: Dict[str, Any]) -> bool:
+        return contract.get("task_type") == "puttwo" or contract.get("count") in {"two", "multiple"}
+
+    def _has_puttwo_cardinality_signal(self, text: str) -> bool:
+        cardinality_terms = [
+            "two",
+            "both",
+            "second",
+            "another",
+            "remaining",
+            "repeat",
+            "each",
+            "all",
+            "until all",
+            "count",
+        ]
+        return self._contains_any(text, cardinality_terms)
+
+    def _has_puttwo_finalization_or_target_signal(self, text: str) -> bool:
+        puttwo_useful_terms = [
+            "target receptacle",
+            "target container",
+            "target location",
+            "destination",
+            "final container",
+            "final receptacle",
+            "return to the target",
+            "return to target",
+            "go back to the target",
+            "put",
+            "place",
+            "placed",
+            "placing",
+        ]
+        return self._contains_any(text, puttwo_useful_terms)
+
+    def _has_puttwo_state_workflow_pollution(self, contract: Dict[str, Any], text: str) -> bool:
+        if not self._is_puttwo_contract(contract):
+            return False
+        if self._has_puttwo_cardinality_signal(text):
+            return False
+        state_workflow_terms = [
+            "clean",
+            "cleaning",
+            "heat",
+            "heating",
+            "hot",
+            "cool",
+            "cooling",
+            "fridge",
+            "microwave",
+            "sinkbasin",
+            "property",
+            "state",
+            "state change",
+            "transformation",
+            "processed",
+            "processing",
+            "appliance",
+            "device",
+        ]
+        return self._contains_any(text, state_workflow_terms)
+
+    def _has_puttwo_weak_cardinality_signal(self, contract: Dict[str, Any], text: str) -> bool:
+        if not self._is_puttwo_contract(contract):
+            return False
+        if self._has_puttwo_cardinality_signal(text) or self._has_puttwo_finalization_or_target_signal(text):
+            return False
+        weak_single_object_patterns = [
+            r"\bexact target object\b",
+            r"\btarget object\b",
+            r"\bacquire\b",
+            r"\bpick up\b",
+            r"\bretrieve\b",
+            r"\bcurrent location\b",
+            r"\bits current location\b",
+            r"\bmanipulation\b",
+            r"\bmanipulate\b",
+            r"\bopen (?:a |the )?(?:container|cabinet|drawer)\b",
+            r"\bcontainers? before\b",
+            r"\bcheck\b",
+            r"\bverify\b",
+            r"\bconfirm\b",
+            r"\bgroup consecutive actions\b",
+            r"\bsame location\b",
+        ]
+        return any(re.search(pattern, text) for pattern in weak_single_object_patterns)
 
     def _has_obvious_verification_loop_risk(self, text: str) -> bool:
         if self._contains_any(text, ["repeated", "repeatedly", "again", "loop", "nothing happens"]):

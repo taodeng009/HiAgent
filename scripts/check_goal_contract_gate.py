@@ -419,6 +419,52 @@ def check_v3_puttwo_single_object_completion_boundary():
     print("PASS v3 puttwo single-object completion boundary")
 
 
+def check_v3_puttwo_cardinality_tightening():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "puttwo",
+        "object": "soapbar",
+        "target": "cabinet",
+        "count": "two",
+        "required_state": "none",
+        "final_action": "put",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Verify that the object you intend to clean matches the required type, because cleaning the wrong item fails.",
+    )
+    assert risk["drop"]
+    assert "puttwo_state_workflow_pollution" in risk["reasons"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Identify and acquire the exact target object before performing any actions.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["puttwo_weak_cardinality_signal"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Open a container only when you need to retrieve or store an item.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["puttwo_weak_cardinality_signal"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Always return to the target receptacle after picking up an object.",
+    )
+    assert not risk["drop"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "After placing one object, continue searching for the remaining object.",
+    )
+    assert not risk["drop"]
+    print("PASS v3 puttwo cardinality tightening")
+
+
 def check_v3_obvious_verification_loop_risk():
     agent = make_agent(mode="per_insight_task_type_rule_v3")
     contract = {
@@ -475,6 +521,7 @@ def main():
     check_diagnostics_only_preserves_prompt_exactly()
     check_v3_place_state_workflow_pollution()
     check_v3_puttwo_single_object_completion_boundary()
+    check_v3_puttwo_cardinality_tightening()
     check_v3_obvious_verification_loop_risk()
     check_v3_state_finalization_is_diagnostic_only()
 
