@@ -42,7 +42,17 @@ class FakeLLM:
         return sum(len(message.get("content", "")) for message in messages)
 
 
-def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_only=False):
+def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_only=False, gate_overrides=None):
+    goal_contract_gate = {
+        "enabled": True,
+        "mode": mode,
+        "split_mode": "c1_insight_lines",
+        "min_kept_insights": 1,
+        "max_kept_insights": 3,
+        "diagnostics_only": diagnostics_only,
+    }
+    if gate_overrides:
+        goal_contract_gate.update(gate_overrides)
     return GMemoryContextEfficientAgent(
         llm_model=FakeLLM(),
         need_goal=True,
@@ -51,14 +61,7 @@ def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_o
             "base_url": "http://127.0.0.1:8090",
             "memory_only": True,
             "max_context_chars": max_context_chars,
-            "goal_contract_gate": {
-                "enabled": True,
-                "mode": mode,
-                "split_mode": "c1_insight_lines",
-                "min_kept_insights": 1,
-                "max_kept_insights": 3,
-                "diagnostics_only": diagnostics_only,
-            },
+            "goal_contract_gate": goal_contract_gate,
         },
     )
 
@@ -506,6 +509,75 @@ def check_v3_state_finalization_is_diagnostic_only():
     print("PASS v3 state finalization diagnostic-only")
 
 
+def check_v3_state_action_refinement():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+
+    clean_contract = {
+        "task_type": "clean",
+        "object": "bowl",
+        "target": "cabinet",
+        "count": "one",
+        "required_state": "clean",
+        "final_action": "put",
+    }
+    risk = agent._assess_goal_contract_risk(
+        clean_contract,
+        "Clean the bowl with the sinkbasin after taking it.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    heat_contract = {
+        "task_type": "heat",
+        "object": "mug",
+        "target": "countertop",
+        "count": "one",
+        "required_state": "hot",
+        "final_action": "put",
+    }
+    risk = agent._assess_goal_contract_risk(
+        heat_contract,
+        "Heat the mug using the microwave once it is available.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    cool_contract = {
+        "task_type": "cool",
+        "object": "apple",
+        "target": "table",
+        "count": "one",
+        "required_state": "cool",
+        "final_action": "put",
+    }
+    risk = agent._assess_goal_contract_risk(
+        cool_contract,
+        "Cool the apple in the fridge before moving on.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        clean_contract,
+        "Before cleaning the bowl, first take it so the object is in inventory.",
+    )
+    assert not risk["drop"]
+    assert risk["diagnostic_reasons"] == []
+
+    drop_agent = make_agent(
+        mode="per_insight_task_type_rule_v3",
+        gate_overrides={"state_finalization_missing_action": "drop"},
+    )
+    risk = drop_agent._assess_goal_contract_risk(
+        clean_contract,
+        "Keep checking whether the bowl is clean before doing anything else.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["missing_finalization_signal"]
+    assert risk["diagnostic_reasons"] == []
+    print("PASS v3 state action refinement")
+
+
 def main():
     check_disabled_path_uses_legacy_filter()
     check_goal_contract_parser()
@@ -524,6 +596,7 @@ def main():
     check_v3_puttwo_cardinality_tightening()
     check_v3_obvious_verification_loop_risk()
     check_v3_state_finalization_is_diagnostic_only()
+    check_v3_state_action_refinement()
 
 
 if __name__ == "__main__":

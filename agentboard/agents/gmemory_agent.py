@@ -170,6 +170,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _goal_contract_gate_diagnostics_only(self) -> bool:
         return bool(self.gmemory_goal_contract_gate_config.get("diagnostics_only", False))
 
+    def _goal_contract_gate_state_finalization_action(self) -> str:
+        return str(self.gmemory_goal_contract_gate_config.get("state_finalization_missing_action", "diagnostic")).strip()
+
     def _empty_gate_diagnostics(self) -> Dict[str, Any]:
         return {
             "enabled": self._goal_contract_gate_enabled() if hasattr(self, "gmemory_goal_contract_gate_config") else False,
@@ -499,8 +502,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if self._has_obvious_verification_loop_risk(text):
             reasons.append("obvious_verification_loop_risk")
 
-        if self._has_clean_heat_cool_missing_finalization_diagnostic(contract, text):
-            diagnostic_reasons.append("missing_finalization_signal")
+        if self._has_clean_heat_cool_missing_finalization_signal(contract, text):
+            if self._goal_contract_gate_state_finalization_action() == "drop":
+                reasons.append("missing_finalization_signal")
+            else:
+                diagnostic_reasons.append("missing_finalization_signal")
 
         return {"drop": bool(reasons), "reasons": reasons, "diagnostic_reasons": diagnostic_reasons}
 
@@ -661,7 +667,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         probe_terms = ["check", "examine", "inventory"]
         return any(len(re.findall(r"\b" + re.escape(term) + r"\b", text)) >= 2 for term in probe_terms)
 
-    def _has_clean_heat_cool_missing_finalization_diagnostic(self, contract: Dict[str, Any], text: str) -> bool:
+    def _has_clean_heat_cool_missing_finalization_signal(self, contract: Dict[str, Any], text: str) -> bool:
         if contract.get("task_type") not in {"clean", "heat", "cool"}:
             return False
         intermediate_terms = [
@@ -682,8 +688,24 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         return (
             self._contains_any(text, intermediate_terms)
             and not self._has_final_action_terms(text)
+            and not self._has_correct_state_device_action(contract, text)
             and not self._has_state_action_precondition(text, contract)
         )
+
+    def _has_correct_state_device_action(self, contract: Dict[str, Any], text: str) -> bool:
+        task_type = contract.get("task_type")
+        if task_type == "clean":
+            action_terms = ["clean", "cleaning"]
+            device_terms = ["sinkbasin"]
+        elif task_type == "heat":
+            action_terms = ["heat", "heating", "hot", "cook", "cooking", "warm"]
+            device_terms = ["microwave", "stoveburner", "toaster", "coffeemachine"]
+        elif task_type == "cool":
+            action_terms = ["cool", "cooling", "cold", "chill", "chilling"]
+            device_terms = ["fridge", "refrigerator"]
+        else:
+            return False
+        return self._contains_any(text, action_terms) and self._contains_any(text, device_terms)
 
     def _has_final_action_terms(self, text: str) -> bool:
         finalization_terms = [
