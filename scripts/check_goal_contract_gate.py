@@ -529,7 +529,7 @@ def check_v3_broad_over_verification_gate():
 
     risk = agent._assess_goal_contract_risk(
         {
-            "task_type": "look",
+            "task_type": "other",
             "object": "plate",
             "target": "desklamp",
             "count": "one",
@@ -574,6 +574,47 @@ def check_v3_broad_over_verification_gate():
     assert not risk["drop"]
     assert risk["diagnostic_reasons"] == []
     print("PASS v3 broad over-verification gate")
+
+
+def check_v3_look_specific_refinement():
+    agent = make_agent(mode="per_insight_task_type_rule_v3")
+    contract = {
+        "task_type": "look",
+        "object": "bowl",
+        "target": "desklamp",
+        "count": "one",
+        "required_state": "none",
+        "final_action": "examine",
+    }
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Locate the bowl and desklamp, then use the exact command examine bowl with desklamp.",
+    )
+    assert not risk["drop"]
+    assert risk["reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Search the room and navigate to the location containing both objects before acting.",
+    )
+    assert not risk["drop"]
+    assert risk["reasons"] == []
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Find the object and put it in the target receptacle to complete the task.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["look_workflow_pollution"]
+
+    risk = agent._assess_goal_contract_risk(
+        contract,
+        "Clean the object using the sinkbasin before placing it in the final location.",
+    )
+    assert risk["drop"]
+    assert risk["reasons"] == ["look_workflow_pollution"]
+    print("PASS v3 look-specific refinement")
 
 
 def check_v3_state_finalization_is_diagnostic_only():
@@ -684,6 +725,7 @@ def main():
     check_v3_puttwo_cardinality_tightening()
     check_v3_obvious_verification_loop_risk()
     check_v3_broad_over_verification_gate()
+    check_v3_look_specific_refinement()
     check_v3_state_finalization_is_diagnostic_only()
     check_v3_state_action_refinement()
 

@@ -499,6 +499,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if self._has_puttwo_weak_cardinality_signal(contract, text):
             reasons.append("puttwo_weak_cardinality_signal")
 
+        if self._has_look_workflow_pollution(contract, text):
+            reasons.append("look_workflow_pollution")
+
         if self._has_obvious_verification_loop_risk(text):
             reasons.append("obvious_verification_loop_risk")
 
@@ -666,6 +669,58 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             r"\bsame location\b",
         ]
         return any(re.search(pattern, text) for pattern in weak_single_object_patterns)
+
+    def _has_look_workflow_pollution(self, contract: Dict[str, Any], text: str) -> bool:
+        if contract.get("task_type") != "look":
+            return False
+        if self._has_look_state_workflow_signal(text):
+            return True
+        return self._has_look_final_target_routine(text)
+
+    def _has_look_state_workflow_signal(self, text: str) -> bool:
+        state_terms = [
+            "clean",
+            "cleaning",
+            "heat",
+            "heating",
+            "hot",
+            "cool",
+            "cooling",
+            "cooled",
+            "fridge",
+            "microwave",
+            "sinkbasin",
+            "stoveburner",
+            "state change",
+            "processed",
+            "processing",
+            "transformation",
+            "appliance",
+            "device readiness",
+        ]
+        return self._contains_any(text, state_terms)
+
+    def _has_look_final_target_routine(self, text: str) -> bool:
+        if not self._contains_any(text, ["put", "place", "placing", "placed"]):
+            return False
+        final_target_terms = [
+            "final location",
+            "final target",
+            "target receptacle",
+            "target container",
+            "target location",
+            "destination",
+            "receptacle",
+            "container",
+            "cabinet",
+            "countertop",
+            "safe",
+            "sofa",
+            "garbagecan",
+            "toilet",
+            "shelf",
+        ]
+        return self._contains_any(text, final_target_terms)
 
     def _has_obvious_verification_loop_risk(self, text: str) -> bool:
         if self._contains_any(text, ["repeated", "repeatedly", "again", "loop", "nothing happens"]):
