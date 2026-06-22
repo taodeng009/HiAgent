@@ -155,6 +155,9 @@ def make_delayed_agent(**overrides):
         "stale_steps_since_last_progress": 2,
         "failure_observation_threshold": 2,
         "require_check_valid_actions_since_progress": True,
+        "failure_signal_policy": "nothing_happens_or_query_action_loop",
+        "query_action_loop_count_threshold": 2,
+        "query_action_loop_ratio_threshold": 0.6,
         "refresh_ttl_on_progress": False,
         "clear_on_progress": False,
     }
@@ -268,6 +271,53 @@ def check_phase1_trigger_skip_reasons():
     assert diagnostics["last_decision"]["trigger_condition_satisfied"] is True
     assert diagnostics["last_decision"]["skip_reason"] == "no_usable_memory"
     print("PASS phase1 trigger skip reasons")
+
+
+def check_phase11_query_action_loop_trigger():
+    memory_prompt = "## Key Insights from Related Tasks\n1. Query-loop recovery guidance."
+    agent = make_delayed_agent(stale_steps_since_last_progress=2)
+    agent._set_gmemory_prompt_state(cached_prompt=memory_prompt, visible_prompt="", retrieve_step=0, reset_events=True)
+
+    drive_no_progress_step(agent, 0, action="check valid actions", observation="Choose an action from these valid actions: inventory")
+    drive_no_progress_step(agent, 1, action="inventory", observation="You are not carrying anything.")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["trigger_reason"] == "query_action_loop"
+    assert diagnostics["query_action_count_since_last_progress"] == 2
+    assert diagnostics["inventory_count_since_last_progress"] == 1
+    assert diagnostics["query_action_ratio_since_last_progress"] == 1.0
+    assert diagnostics["last_decision"]["trigger_condition_satisfied"] is True
+    assert diagnostics["last_decision"]["trigger_reason"] == "query_action_loop"
+    assert diagnostics["injection_events"][-1]["trigger_reason"] == "query_action_loop"
+    assert agent.visible_gmemory_prompt == memory_prompt
+
+    rollback_agent = make_delayed_agent(
+        failure_signal_policy="nothing_happens_and_check",
+        stale_steps_since_last_progress=2,
+    )
+    rollback_agent._set_gmemory_prompt_state(cached_prompt=memory_prompt, visible_prompt="", retrieve_step=0, reset_events=True)
+    drive_no_progress_step(rollback_agent, 0, action="check valid actions", observation="Choose an action from these valid actions: inventory")
+    drive_no_progress_step(rollback_agent, 1, action="inventory", observation="You are not carrying anything.")
+    rollback_diag = rollback_agent.get_diagnostics()["gmemory_intervention"]
+    assert rollback_diag["query_action_loop_trigger"] is True
+    assert rollback_diag["last_decision"]["trigger_condition_satisfied"] is False
+    assert rollback_agent.visible_gmemory_prompt == ""
+
+    ratio_agent = make_delayed_agent(
+        stale_steps_since_last_progress=4,
+        query_action_loop_count_threshold=2,
+        query_action_loop_ratio_threshold=0.75,
+    )
+    ratio_agent._set_gmemory_prompt_state(cached_prompt=memory_prompt, visible_prompt="", retrieve_step=0, reset_events=True)
+    drive_no_progress_step(ratio_agent, 0, action="go to fridge 1", observation="The fridge 1 is closed.")
+    drive_no_progress_step(ratio_agent, 1, action="check valid actions", observation="Choose an action from these valid actions: inventory")
+    drive_no_progress_step(ratio_agent, 2, action="go to fridge 1", observation="The fridge 1 is closed.")
+    drive_no_progress_step(ratio_agent, 3, action="inventory", observation="You are not carrying anything.")
+    ratio_diag = ratio_agent.get_diagnostics()["gmemory_intervention"]
+    assert ratio_diag["query_action_count_since_last_progress"] == 2
+    assert ratio_diag["query_action_ratio_since_last_progress"] == 0.5
+    assert ratio_diag["query_action_loop_trigger"] is False
+    assert ratio_diag["last_decision"]["trigger_condition_satisfied"] is False
+    print("PASS phase1.1 query action loop trigger")
 
 
 def check_goal_contract_parser():
@@ -886,6 +936,7 @@ def main():
     check_phase1_delayed_reset_and_prompt_visibility()
     check_phase1_trigger_ttl_cooldown_and_progress_delta()
     check_phase1_trigger_skip_reasons()
+    check_phase11_query_action_loop_trigger()
     check_goal_contract_parser()
     check_insight_split()
     check_instruction_preamble_filtered()

@@ -67,6 +67,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_stale_steps_since_last_progress = 0
         self.gmemory_nothing_happens_since_last_progress = 0
         self.gmemory_check_valid_actions_since_last_progress = 0
+        self.gmemory_inventory_since_last_progress = 0
         self.gmemory_last_intervention_decision = {}
         self.gmemory_injection_events = []
         self.gmemory_clear_events = []
@@ -228,6 +229,20 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _intervention_requires_check_valid_actions(self) -> bool:
         return bool(self.gmemory_need_aware_intervention_config.get("require_check_valid_actions_since_progress", True))
 
+    def _intervention_failure_signal_policy(self) -> str:
+        return str(
+            self.gmemory_need_aware_intervention_config.get(
+                "failure_signal_policy",
+                "nothing_happens_or_query_action_loop",
+            )
+        ).strip()
+
+    def _query_action_loop_count_threshold(self) -> int:
+        return max(0, int(self.gmemory_need_aware_intervention_config.get("query_action_loop_count_threshold", 3)))
+
+    def _query_action_loop_ratio_threshold(self) -> float:
+        return max(0.0, min(1.0, float(self.gmemory_need_aware_intervention_config.get("query_action_loop_ratio_threshold", 0.6))))
+
     def _reset_intervention_runtime_state(self) -> None:
         self.gmemory_retrieve_step = None
         self.gmemory_visible_ttl_remaining = None
@@ -235,6 +250,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_stale_steps_since_last_progress = 0
         self.gmemory_nothing_happens_since_last_progress = 0
         self.gmemory_check_valid_actions_since_last_progress = 0
+        self.gmemory_inventory_since_last_progress = 0
         self.gmemory_last_intervention_decision = {}
         self.gmemory_injection_events = []
         self.gmemory_clear_events = []
@@ -263,6 +279,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "stale_steps_since_last_progress": 0,
             "nothing_happens_count_since_last_progress": 0,
             "check_valid_actions_count_since_last_progress": 0,
+            "inventory_count_since_last_progress": 0,
+            "query_action_count_since_last_progress": 0,
+            "query_action_ratio_since_last_progress": 0.0,
+            "failure_signal_policy": "nothing_happens_or_query_action_loop",
+            "nothing_happens_trigger": False,
+            "query_action_loop_trigger": False,
+            "trigger_reason": "",
             "last_decision": {},
         }
 
@@ -315,23 +338,70 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 "stale_steps_since_last_progress": self.gmemory_stale_steps_since_last_progress,
                 "nothing_happens_count_since_last_progress": self.gmemory_nothing_happens_since_last_progress,
                 "check_valid_actions_count_since_last_progress": self.gmemory_check_valid_actions_since_last_progress,
+                "inventory_count_since_last_progress": self.gmemory_inventory_since_last_progress,
+                "query_action_count_since_last_progress": self._query_action_count_since_last_progress(),
+                "query_action_ratio_since_last_progress": self._query_action_ratio_since_last_progress(),
+                "failure_signal_policy": self._intervention_failure_signal_policy(),
+                "nothing_happens_trigger": self._nothing_happens_trigger_satisfied(),
+                "query_action_loop_trigger": self._query_action_loop_trigger_satisfied(),
+                "trigger_reason": self._current_trigger_reason(),
                 "last_decision": dict(self.gmemory_last_intervention_decision),
             }
         )
         self.gmemory_intervention_diagnostics = diagnostics
 
-    def _intervention_trigger_condition_satisfied(self) -> bool:
+    def _query_action_count_since_last_progress(self) -> int:
+        return self.gmemory_check_valid_actions_since_last_progress + self.gmemory_inventory_since_last_progress
+
+    def _query_action_ratio_since_last_progress(self) -> float:
+        if self.gmemory_stale_steps_since_last_progress <= 0:
+            return 0.0
+        return self._query_action_count_since_last_progress() / float(self.gmemory_stale_steps_since_last_progress)
+
+    def _nothing_happens_trigger_satisfied(self) -> bool:
         check_valid_actions_ok = (
             self.gmemory_check_valid_actions_since_last_progress > 0
             if self._intervention_requires_check_valid_actions()
             else True
         )
         return (
-            self.gmemory_stale_steps_since_last_progress >= self._intervention_stale_threshold()
-            and self.gmemory_nothing_happens_since_last_progress
+            self.gmemory_nothing_happens_since_last_progress
             >= self._intervention_failure_observation_threshold()
             and check_valid_actions_ok
         )
+
+    def _query_action_loop_trigger_satisfied(self) -> bool:
+        return (
+            self._query_action_count_since_last_progress() >= self._query_action_loop_count_threshold()
+            and self._query_action_ratio_since_last_progress() >= self._query_action_loop_ratio_threshold()
+        )
+
+    def _current_trigger_reason(self) -> str:
+        nothing_happens_trigger = self._nothing_happens_trigger_satisfied()
+        query_action_loop_trigger = self._query_action_loop_trigger_satisfied()
+        if nothing_happens_trigger and query_action_loop_trigger:
+            return "nothing_happens+query_action_loop"
+        if nothing_happens_trigger:
+            return "nothing_happens"
+        if query_action_loop_trigger:
+            return "query_action_loop"
+        return ""
+
+    def _intervention_trigger_condition_satisfied(self) -> bool:
+        if self.gmemory_stale_steps_since_last_progress < self._intervention_stale_threshold():
+            return False
+        policy = self._intervention_failure_signal_policy()
+        nothing_happens_trigger = self._nothing_happens_trigger_satisfied()
+        query_action_loop_trigger = self._query_action_loop_trigger_satisfied()
+        if policy == "nothing_happens_only":
+            return self.gmemory_nothing_happens_since_last_progress >= self._intervention_failure_observation_threshold()
+        if policy == "nothing_happens_and_check":
+            return nothing_happens_trigger
+        if policy == "query_action_loop":
+            return query_action_loop_trigger
+        if policy == "nothing_happens_or_query_action_loop":
+            return nothing_happens_trigger or query_action_loop_trigger
+        return nothing_happens_trigger
 
     def _record_intervention_decision(
         self,
@@ -369,6 +439,10 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "stale_steps_since_last_progress": self.gmemory_stale_steps_since_last_progress,
             "nothing_happens_count_since_last_progress": self.gmemory_nothing_happens_since_last_progress,
             "check_valid_actions_count_since_last_progress": self.gmemory_check_valid_actions_since_last_progress,
+            "inventory_count_since_last_progress": self.gmemory_inventory_since_last_progress,
+            "query_action_count_since_last_progress": self._query_action_count_since_last_progress(),
+            "query_action_ratio_since_last_progress": self._query_action_ratio_since_last_progress(),
+            "trigger_reason": self._current_trigger_reason(),
             "gate_kept_count": self.gmemory_gate_diagnostics.get("kept_count"),
             "gate_dropped_count": self.gmemory_gate_diagnostics.get("dropped_count"),
         }
@@ -417,6 +491,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             self.gmemory_stale_steps_since_last_progress = 0
             self.gmemory_nothing_happens_since_last_progress = 0
             self.gmemory_check_valid_actions_since_last_progress = 0
+            self.gmemory_inventory_since_last_progress = 0
             if self.gmemory_active_injection_index is not None:
                 event = self.gmemory_injection_events[self.gmemory_active_injection_index]
                 event["post_injection_progress_delta"] = progress_rate - float(event.get("progress_at_injection") or 0.0)
@@ -426,8 +501,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 self.gmemory_nothing_happens_since_last_progress += 1
             if is_check_valid_actions:
                 self.gmemory_check_valid_actions_since_last_progress += 1
+            if str(executed_action or "").strip() == "inventory":
+                self.gmemory_inventory_since_last_progress += 1
 
         trigger_condition_satisfied = self._intervention_trigger_condition_satisfied()
+        trigger_reason = self._current_trigger_reason() if trigger_condition_satisfied else ""
         in_reentry_cooldown = self.gmemory_cooldown_remaining > 0
         if memory_visible_at_step:
             self._record_intervention_decision(
@@ -475,6 +553,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 memory_visible=False,
                 in_reentry_cooldown=False,
             )
+        if self.gmemory_last_intervention_decision is not None:
+            self.gmemory_last_intervention_decision["trigger_reason"] = trigger_reason
 
         if memory_visible_at_step and self.gmemory_visible_ttl_remaining is not None:
             self.gmemory_visible_ttl_remaining = max(0, self.gmemory_visible_ttl_remaining - 1)
