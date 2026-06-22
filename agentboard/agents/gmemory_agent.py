@@ -61,6 +61,16 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.cached_gmemory_prompt = ""
         self.visible_gmemory_prompt = ""
         self.gmemory_prompt = ""
+        self.gmemory_retrieve_step = None
+        self.gmemory_visible_ttl_remaining = None
+        self.gmemory_cooldown_remaining = 0
+        self.gmemory_stale_steps_since_last_progress = 0
+        self.gmemory_nothing_happens_since_last_progress = 0
+        self.gmemory_check_valid_actions_since_last_progress = 0
+        self.gmemory_last_intervention_decision = {}
+        self.gmemory_injection_events = []
+        self.gmemory_clear_events = []
+        self.gmemory_active_injection_index = None
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
         self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
         self.gmemory_client = self._build_gmemory_client()
@@ -80,7 +90,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
 
     def reset(self, goal, init_obs, init_act=None):
         super().reset(goal, init_obs, init_act)
-        self._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=None)
+        self._reset_intervention_runtime_state()
+        self._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=None, reset_events=True)
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
         self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
         if not self.gmemory_enabled or not self.gmemory_recall_on_reset or self.gmemory_client is None:
@@ -103,13 +114,15 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 else:
                     gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
                     final_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
-                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=final_prompt, retrieve_step=0)
-                self.gmemory_gate_diagnostics["final_memory_chars"] = len(self.gmemory_prompt)
-                self.gmemory_gate_diagnostics["final_memory_prompt"] = self.gmemory_prompt
+                visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
+                self.gmemory_gate_diagnostics["final_memory_chars"] = len(final_prompt)
+                self.gmemory_gate_diagnostics["final_memory_prompt"] = final_prompt
                 self.gmemory_gate_diagnostics["memory_injected"] = bool(self.gmemory_prompt)
             else:
                 final_prompt = self._filter_gmemory_prompt(raw_prompt)
-                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=final_prompt, retrieve_step=0)
+                visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
             logger.info(
                 "GMemory retrieve completed: memory_prompt_chars=%s",
                 len(self.gmemory_prompt),
@@ -186,6 +199,47 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _need_aware_intervention_mode(self) -> str:
         return str(self.gmemory_need_aware_intervention_config.get("mode", "disabled")).strip() or "disabled"
 
+    def _delayed_task_level_intervention_enabled(self) -> bool:
+        return (
+            self._need_aware_intervention_enabled()
+            and self._need_aware_intervention_mode() == "delayed_task_level_memory_injection"
+        )
+
+    def _intervention_visibility_ttl(self) -> int:
+        return max(1, int(self.gmemory_need_aware_intervention_config.get("visibility_ttl", 3)))
+
+    def _intervention_reentry_cooldown(self) -> int:
+        return max(
+            0,
+            int(
+                self.gmemory_need_aware_intervention_config.get(
+                    "reentry_cooldown_after_clear",
+                    self._intervention_visibility_ttl(),
+                )
+            ),
+        )
+
+    def _intervention_stale_threshold(self) -> int:
+        return max(0, int(self.gmemory_need_aware_intervention_config.get("stale_steps_since_last_progress", 8)))
+
+    def _intervention_failure_observation_threshold(self) -> int:
+        return max(0, int(self.gmemory_need_aware_intervention_config.get("failure_observation_threshold", 2)))
+
+    def _intervention_requires_check_valid_actions(self) -> bool:
+        return bool(self.gmemory_need_aware_intervention_config.get("require_check_valid_actions_since_progress", True))
+
+    def _reset_intervention_runtime_state(self) -> None:
+        self.gmemory_retrieve_step = None
+        self.gmemory_visible_ttl_remaining = None
+        self.gmemory_cooldown_remaining = 0
+        self.gmemory_stale_steps_since_last_progress = 0
+        self.gmemory_nothing_happens_since_last_progress = 0
+        self.gmemory_check_valid_actions_since_last_progress = 0
+        self.gmemory_last_intervention_decision = {}
+        self.gmemory_injection_events = []
+        self.gmemory_clear_events = []
+        self.gmemory_active_injection_index = None
+
     def _empty_intervention_diagnostics(self) -> Dict[str, Any]:
         return {
             "enabled": self._need_aware_intervention_enabled()
@@ -206,6 +260,10 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "current_cooldown_remaining": None,
             "cached_memory_chars": 0,
             "visible_memory_chars": 0,
+            "stale_steps_since_last_progress": 0,
+            "nothing_happens_count_since_last_progress": 0,
+            "check_valid_actions_count_since_last_progress": 0,
+            "last_decision": {},
         }
 
     def _set_gmemory_prompt_state(
@@ -213,33 +271,222 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         cached_prompt: str,
         visible_prompt: str,
         retrieve_step: Optional[int],
+        reset_events: bool = False,
     ) -> None:
         self.cached_gmemory_prompt = cached_prompt or ""
         self.visible_gmemory_prompt = visible_prompt or ""
         self.gmemory_prompt = self.visible_gmemory_prompt
+        self.gmemory_retrieve_step = retrieve_step
+        if reset_events:
+            self.gmemory_injection_events = []
+            self.gmemory_clear_events = []
+            self.gmemory_active_injection_index = None
+        if self.visible_gmemory_prompt and not self._delayed_task_level_intervention_enabled() and not self.gmemory_injection_events:
+            self.gmemory_injection_events.append(
+                {
+                    "step": retrieve_step,
+                    "reason": "reset_time_immediate",
+                    "memory_chars": len(self.visible_gmemory_prompt),
+                    "progress_at_injection": None,
+                    "post_injection_progress_delta": 0.0,
+                    "visible_ttl": None,
+                    "trigger_condition_satisfied": False,
+                }
+            )
+        self._refresh_intervention_diagnostics()
+
+    def _refresh_intervention_diagnostics(self) -> None:
         diagnostics = self._empty_intervention_diagnostics()
         diagnostics.update(
             {
-                "retrieved": retrieve_step is not None,
+                "retrieved": self.gmemory_retrieve_step is not None,
                 "cached": bool(self.cached_gmemory_prompt),
                 "injected": bool(self.visible_gmemory_prompt),
                 "visible": bool(self.visible_gmemory_prompt),
                 "retrieved_but_not_injected": bool(self.cached_gmemory_prompt)
                 and not bool(self.visible_gmemory_prompt),
-                "retrieve_step": retrieve_step,
+                "retrieve_step": self.gmemory_retrieve_step,
+                "injection_events": list(self.gmemory_injection_events),
+                "clear_events": list(self.gmemory_clear_events),
+                "current_visible_ttl_remaining": self.gmemory_visible_ttl_remaining,
+                "current_cooldown_remaining": self.gmemory_cooldown_remaining,
                 "cached_memory_chars": len(self.cached_gmemory_prompt),
                 "visible_memory_chars": len(self.visible_gmemory_prompt),
+                "stale_steps_since_last_progress": self.gmemory_stale_steps_since_last_progress,
+                "nothing_happens_count_since_last_progress": self.gmemory_nothing_happens_since_last_progress,
+                "check_valid_actions_count_since_last_progress": self.gmemory_check_valid_actions_since_last_progress,
+                "last_decision": dict(self.gmemory_last_intervention_decision),
             }
         )
-        if self.visible_gmemory_prompt:
-            diagnostics["injection_events"] = [
-                {
-                    "step": retrieve_step,
-                    "reason": "reset_time_immediate",
-                    "memory_chars": len(self.visible_gmemory_prompt),
-                }
-            ]
         self.gmemory_intervention_diagnostics = diagnostics
+
+    def _intervention_trigger_condition_satisfied(self) -> bool:
+        check_valid_actions_ok = (
+            self.gmemory_check_valid_actions_since_last_progress > 0
+            if self._intervention_requires_check_valid_actions()
+            else True
+        )
+        return (
+            self.gmemory_stale_steps_since_last_progress >= self._intervention_stale_threshold()
+            and self.gmemory_nothing_happens_since_last_progress
+            >= self._intervention_failure_observation_threshold()
+            and check_valid_actions_ok
+        )
+
+    def _record_intervention_decision(
+        self,
+        trigger_condition_satisfied: bool,
+        intervention_allowed: bool,
+        would_trigger: bool,
+        skip_reason: str,
+        memory_visible: bool,
+        in_reentry_cooldown: bool,
+    ) -> None:
+        self.gmemory_last_intervention_decision = {
+            "trigger_condition_satisfied": trigger_condition_satisfied,
+            "intervention_allowed": intervention_allowed,
+            "would_trigger": would_trigger,
+            "skip_reason": skip_reason,
+            "memory_visible": memory_visible,
+            "in_reentry_cooldown": in_reentry_cooldown,
+            "ttl_remaining": self.gmemory_visible_ttl_remaining,
+            "cooldown_remaining": self.gmemory_cooldown_remaining,
+        }
+
+    def _inject_cached_gmemory(self, step_id: int, progress_rate: float, trigger_condition_satisfied: bool) -> None:
+        self.visible_gmemory_prompt = self.cached_gmemory_prompt
+        self.gmemory_prompt = self.visible_gmemory_prompt
+        self.gmemory_visible_ttl_remaining = self._intervention_visibility_ttl()
+        event = {
+            "step": step_id,
+            "reason": "stuck_trigger",
+            "memory_chars": len(self.visible_gmemory_prompt),
+            "progress_at_injection": progress_rate,
+            "post_injection_progress_delta": 0.0,
+            "visible_ttl": self.gmemory_visible_ttl_remaining,
+            "cooldown": self._intervention_reentry_cooldown(),
+            "trigger_condition_satisfied": trigger_condition_satisfied,
+            "stale_steps_since_last_progress": self.gmemory_stale_steps_since_last_progress,
+            "nothing_happens_count_since_last_progress": self.gmemory_nothing_happens_since_last_progress,
+            "check_valid_actions_count_since_last_progress": self.gmemory_check_valid_actions_since_last_progress,
+            "gate_kept_count": self.gmemory_gate_diagnostics.get("kept_count"),
+            "gate_dropped_count": self.gmemory_gate_diagnostics.get("dropped_count"),
+        }
+        self.gmemory_injection_events.append(event)
+        self.gmemory_active_injection_index = len(self.gmemory_injection_events) - 1
+
+    def _clear_visible_gmemory(self, step_id: int, reason: str, progress_rate: float) -> None:
+        if not self.visible_gmemory_prompt:
+            return
+        progress_delta = 0.0
+        if self.gmemory_active_injection_index is not None:
+            event = self.gmemory_injection_events[self.gmemory_active_injection_index]
+            progress_delta = progress_rate - float(event.get("progress_at_injection") or 0.0)
+            event["post_injection_progress_delta"] = progress_delta
+        self.gmemory_clear_events.append(
+            {
+                "step": step_id,
+                "reason": reason,
+                "progress_delta_since_injection": progress_delta,
+            }
+        )
+        self.visible_gmemory_prompt = ""
+        self.gmemory_prompt = ""
+        self.gmemory_visible_ttl_remaining = None
+        self.gmemory_cooldown_remaining = self._intervention_reentry_cooldown()
+        self.gmemory_active_injection_index = None
+
+    def update_intervention_state(
+        self,
+        step_id: int,
+        executed_action: str,
+        observation: str,
+        progress_rate: float,
+        previous_progress_rate: float,
+        is_valid_action: bool,
+        nothing_happens: bool,
+        is_check_valid_actions: bool,
+    ) -> None:
+        if not self._delayed_task_level_intervention_enabled():
+            self._refresh_intervention_diagnostics()
+            return
+
+        memory_visible_at_step = bool(self.visible_gmemory_prompt)
+        progress_improved = progress_rate > previous_progress_rate
+        if progress_improved:
+            self.gmemory_stale_steps_since_last_progress = 0
+            self.gmemory_nothing_happens_since_last_progress = 0
+            self.gmemory_check_valid_actions_since_last_progress = 0
+            if self.gmemory_active_injection_index is not None:
+                event = self.gmemory_injection_events[self.gmemory_active_injection_index]
+                event["post_injection_progress_delta"] = progress_rate - float(event.get("progress_at_injection") or 0.0)
+        else:
+            self.gmemory_stale_steps_since_last_progress += 1
+            if nothing_happens:
+                self.gmemory_nothing_happens_since_last_progress += 1
+            if is_check_valid_actions:
+                self.gmemory_check_valid_actions_since_last_progress += 1
+
+        trigger_condition_satisfied = self._intervention_trigger_condition_satisfied()
+        in_reentry_cooldown = self.gmemory_cooldown_remaining > 0
+        if memory_visible_at_step:
+            self._record_intervention_decision(
+                trigger_condition_satisfied=trigger_condition_satisfied,
+                intervention_allowed=False,
+                would_trigger=False,
+                skip_reason="memory_visible",
+                memory_visible=True,
+                in_reentry_cooldown=in_reentry_cooldown,
+            )
+        elif in_reentry_cooldown:
+            self._record_intervention_decision(
+                trigger_condition_satisfied=trigger_condition_satisfied,
+                intervention_allowed=False,
+                would_trigger=trigger_condition_satisfied,
+                skip_reason="reentry_cooldown",
+                memory_visible=False,
+                in_reentry_cooldown=True,
+            )
+        elif trigger_condition_satisfied:
+            if self.gmemory_retrieve_step is None:
+                skip_reason = "no_cached_memory"
+                allowed = False
+            elif not self.cached_gmemory_prompt:
+                skip_reason = "no_usable_memory"
+                allowed = False
+            else:
+                skip_reason = "none"
+                allowed = True
+                self._inject_cached_gmemory(step_id, progress_rate, trigger_condition_satisfied)
+            self._record_intervention_decision(
+                trigger_condition_satisfied=trigger_condition_satisfied,
+                intervention_allowed=allowed,
+                would_trigger=trigger_condition_satisfied,
+                skip_reason=skip_reason,
+                memory_visible=False,
+                in_reentry_cooldown=False,
+            )
+        else:
+            self._record_intervention_decision(
+                trigger_condition_satisfied=False,
+                intervention_allowed=False,
+                would_trigger=False,
+                skip_reason="none",
+                memory_visible=False,
+                in_reentry_cooldown=False,
+            )
+
+        if memory_visible_at_step and self.gmemory_visible_ttl_remaining is not None:
+            self.gmemory_visible_ttl_remaining = max(0, self.gmemory_visible_ttl_remaining - 1)
+            if self.gmemory_visible_ttl_remaining == 0:
+                self._clear_visible_gmemory(step_id, "ttl_expired", progress_rate)
+        elif not memory_visible_at_step and self.gmemory_cooldown_remaining > 0:
+            self.gmemory_cooldown_remaining = max(0, self.gmemory_cooldown_remaining - 1)
+
+        if self.gmemory_last_intervention_decision:
+            self.gmemory_last_intervention_decision["ttl_remaining"] = self.gmemory_visible_ttl_remaining
+            self.gmemory_last_intervention_decision["cooldown_remaining"] = self.gmemory_cooldown_remaining
+        self._refresh_intervention_diagnostics()
 
     def _empty_gate_diagnostics(self) -> Dict[str, Any]:
         return {

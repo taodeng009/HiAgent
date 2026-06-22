@@ -269,6 +269,21 @@ class Evalalfworld(BaseTask):
             
             if reward > last_reward:
                 score_change_record.append((i, reward))
+            update_intervention_state = getattr(self.agent, "update_intervention_state", None)
+            if callable(update_intervention_state):
+                try:
+                    update_intervention_state(
+                        step_id=i,
+                        executed_action=action,
+                        observation=observation,
+                        progress_rate=reward,
+                        previous_progress_rate=last_reward,
+                        is_valid_action=is_valid_action,
+                        nothing_happens=nothing_happens,
+                        is_check_valid_actions=(action == "check valid actions"),
+                    )
+                except Exception as exc:
+                    logger.warning("update_intervention_state failed: {}".format(exc))
             last_reward = reward
             self.agent.update(action=action, state=observation)
             if done:

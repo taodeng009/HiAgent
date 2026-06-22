@@ -42,6 +42,14 @@ class FakeLLM:
         return sum(len(message.get("content", "")) for message in messages)
 
 
+class FakeGMemoryClient:
+    def __init__(self, memory_prompt):
+        self.memory_prompt = memory_prompt
+
+    def retrieve(self, **kwargs):
+        return {"memory_prompt": self.memory_prompt}
+
+
 def make_agent(
     max_context_chars=5000,
     mode="per_insight_rule_v2",
@@ -107,7 +115,7 @@ Ignore this section.
 def check_phase0_intervention_diagnostics_and_compat_prompt_state():
     agent = make_agent(need_aware_intervention={"enabled": False, "mode": "disabled"})
     prompt = "## Key Insights from Related Tasks\n1. Pick up the object before placing it."
-    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt=prompt, retrieve_step=0)
+    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt=prompt, retrieve_step=0, reset_events=True)
     diagnostics = agent.get_diagnostics()
     intervention = diagnostics["gmemory_intervention"]
     assert agent.cached_gmemory_prompt == prompt
@@ -125,7 +133,7 @@ def check_phase0_intervention_diagnostics_and_compat_prompt_state():
     assert intervention["retrieve_step"] == 0
     assert intervention["injection_events"][0]["reason"] == "reset_time_immediate"
 
-    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt="", retrieve_step=2)
+    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt="", retrieve_step=2, reset_events=True)
     diagnostics = agent.get_diagnostics()
     intervention = diagnostics["gmemory_intervention"]
     assert agent.cached_gmemory_prompt == prompt
@@ -136,6 +144,130 @@ def check_phase0_intervention_diagnostics_and_compat_prompt_state():
     assert intervention["injection_events"] == []
     json.dumps(diagnostics)
     print("PASS phase0 intervention diagnostics and compat prompt state")
+
+
+def make_delayed_agent(**overrides):
+    config = {
+        "enabled": True,
+        "mode": "delayed_task_level_memory_injection",
+        "visibility_ttl": 2,
+        "reentry_cooldown_after_clear": 2,
+        "stale_steps_since_last_progress": 2,
+        "failure_observation_threshold": 2,
+        "require_check_valid_actions_since_progress": True,
+        "refresh_ttl_on_progress": False,
+        "clear_on_progress": False,
+    }
+    config.update(overrides)
+    return make_agent(mode="per_insight_task_type_rule_v3", need_aware_intervention=config)
+
+
+def drive_no_progress_step(agent, step, action="go to desk 1", observation="Nothing happens."):
+    agent.update_intervention_state(
+        step_id=step,
+        executed_action=action,
+        observation=observation,
+        progress_rate=0.0,
+        previous_progress_rate=0.0,
+        is_valid_action=True,
+        nothing_happens=(observation.strip() == "Nothing happens."),
+        is_check_valid_actions=(action == "check valid actions"),
+    )
+
+
+def check_phase1_delayed_reset_and_prompt_visibility():
+    os.environ.setdefault("EVALTASK", "alfworld")
+    agent = make_delayed_agent()
+    agent.set_current_task_type("place")
+    agent.gmemory_client = FakeGMemoryClient(
+        "## Key Insights from Related Tasks\n"
+        "1. Find the plate, pick it up, and put it on the countertop."
+    )
+    agent.reset(goal="put a plate in countertop.", init_obs="You are in the middle of a room.")
+    assert agent.cached_gmemory_prompt.startswith("## Key Insights from Related Tasks")
+    assert agent.visible_gmemory_prompt == ""
+    assert agent.gmemory_prompt == ""
+    diagnostics = agent.get_diagnostics()
+    assert diagnostics["memory_injected_to_prompt"] is False
+    assert diagnostics["gmemory_intervention"]["retrieved_but_not_injected"] is True
+
+    prompt = agent.make_prompt(need_goal=True, check_actions="check valid actions", check_inventory="inventory")
+    assert "## Key Insights from Related Tasks" not in prompt
+    print("PASS phase1 delayed reset and prompt visibility")
+
+
+def check_phase1_trigger_ttl_cooldown_and_progress_delta():
+    agent = make_delayed_agent()
+    memory_prompt = "## Key Insights from Related Tasks\n1. Use cached guidance only when stuck."
+    agent._set_gmemory_prompt_state(cached_prompt=memory_prompt, visible_prompt="", retrieve_step=0, reset_events=True)
+
+    drive_no_progress_step(agent, 0)
+    assert agent.visible_gmemory_prompt == ""
+    assert agent.get_diagnostics()["gmemory_intervention"]["last_decision"]["trigger_condition_satisfied"] is False
+
+    drive_no_progress_step(agent, 1, action="check valid actions")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.visible_gmemory_prompt == memory_prompt
+    assert diagnostics["last_decision"]["trigger_condition_satisfied"] is True
+    assert diagnostics["last_decision"]["intervention_allowed"] is True
+    assert diagnostics["last_decision"]["skip_reason"] == "none"
+    assert diagnostics["current_visible_ttl_remaining"] == 2
+    assert diagnostics["injection_events"][-1]["step"] == 1
+
+    agent.update_intervention_state(
+        step_id=2,
+        executed_action="go to desk 1",
+        observation="Nothing happens.",
+        progress_rate=0.25,
+        previous_progress_rate=0.0,
+        is_valid_action=True,
+        nothing_happens=True,
+        is_check_valid_actions=False,
+    )
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["stale_steps_since_last_progress"] == 0
+    assert diagnostics["current_visible_ttl_remaining"] == 1
+    assert diagnostics["injection_events"][-1]["post_injection_progress_delta"] == 0.25
+    assert diagnostics["last_decision"]["skip_reason"] == "memory_visible"
+
+    agent.update_intervention_state(
+        step_id=3,
+        executed_action="go to desk 1",
+        observation="Nothing happens.",
+        progress_rate=0.25,
+        previous_progress_rate=0.25,
+        is_valid_action=True,
+        nothing_happens=True,
+        is_check_valid_actions=False,
+    )
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.visible_gmemory_prompt == ""
+    assert diagnostics["current_visible_ttl_remaining"] is None
+    assert diagnostics["current_cooldown_remaining"] == 2
+    assert diagnostics["clear_events"][-1]["reason"] == "ttl_expired"
+
+    drive_no_progress_step(agent, 4, action="check valid actions")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["last_decision"]["would_trigger"] is True
+    assert diagnostics["last_decision"]["skip_reason"] == "reentry_cooldown"
+    assert diagnostics["current_cooldown_remaining"] == 1
+    print("PASS phase1 trigger ttl cooldown and progress delta")
+
+
+def check_phase1_trigger_skip_reasons():
+    no_cached_agent = make_delayed_agent(stale_steps_since_last_progress=1, failure_observation_threshold=1)
+    drive_no_progress_step(no_cached_agent, 0, action="check valid actions")
+    diagnostics = no_cached_agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["last_decision"]["trigger_condition_satisfied"] is True
+    assert diagnostics["last_decision"]["skip_reason"] == "no_cached_memory"
+
+    no_usable_agent = make_delayed_agent(stale_steps_since_last_progress=1, failure_observation_threshold=1)
+    no_usable_agent._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=0, reset_events=True)
+    drive_no_progress_step(no_usable_agent, 0, action="check valid actions")
+    diagnostics = no_usable_agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["last_decision"]["trigger_condition_satisfied"] is True
+    assert diagnostics["last_decision"]["skip_reason"] == "no_usable_memory"
+    print("PASS phase1 trigger skip reasons")
 
 
 def check_goal_contract_parser():
@@ -751,6 +883,9 @@ def check_v3_state_action_refinement():
 def main():
     check_disabled_path_uses_legacy_filter()
     check_phase0_intervention_diagnostics_and_compat_prompt_state()
+    check_phase1_delayed_reset_and_prompt_visibility()
+    check_phase1_trigger_ttl_cooldown_and_progress_delta()
+    check_phase1_trigger_skip_reasons()
     check_goal_contract_parser()
     check_insight_split()
     check_instruction_preamble_filtered()
