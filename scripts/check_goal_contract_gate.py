@@ -42,7 +42,13 @@ class FakeLLM:
         return sum(len(message.get("content", "")) for message in messages)
 
 
-def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_only=False, gate_overrides=None):
+def make_agent(
+    max_context_chars=5000,
+    mode="per_insight_rule_v2",
+    diagnostics_only=False,
+    gate_overrides=None,
+    need_aware_intervention=None,
+):
     goal_contract_gate = {
         "enabled": True,
         "mode": mode,
@@ -62,6 +68,7 @@ def make_agent(max_context_chars=5000, mode="per_insight_rule_v2", diagnostics_o
             "memory_only": True,
             "max_context_chars": max_context_chars,
             "goal_contract_gate": goal_contract_gate,
+            "need_aware_intervention": need_aware_intervention or {},
         },
     )
 
@@ -95,6 +102,40 @@ Ignore this section.
     assert legacy_prompt.startswith("## Key Insights from Related Tasks")
     assert len(legacy_prompt) <= 90
     print("PASS disabled path legacy filter")
+
+
+def check_phase0_intervention_diagnostics_and_compat_prompt_state():
+    agent = make_agent(need_aware_intervention={"enabled": False, "mode": "disabled"})
+    prompt = "## Key Insights from Related Tasks\n1. Pick up the object before placing it."
+    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt=prompt, retrieve_step=0)
+    diagnostics = agent.get_diagnostics()
+    intervention = diagnostics["gmemory_intervention"]
+    assert agent.cached_gmemory_prompt == prompt
+    assert agent.visible_gmemory_prompt == prompt
+    assert agent.gmemory_prompt == prompt
+    assert diagnostics["gmemory_prompt_chars"] == len(prompt)
+    assert diagnostics["memory_injected_to_prompt"] is True
+    assert intervention["enabled"] is False
+    assert intervention["mode"] == "disabled"
+    assert intervention["retrieved"] is True
+    assert intervention["cached"] is True
+    assert intervention["injected"] is True
+    assert intervention["visible"] is True
+    assert intervention["retrieved_but_not_injected"] is False
+    assert intervention["retrieve_step"] == 0
+    assert intervention["injection_events"][0]["reason"] == "reset_time_immediate"
+
+    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt="", retrieve_step=2)
+    diagnostics = agent.get_diagnostics()
+    intervention = diagnostics["gmemory_intervention"]
+    assert agent.cached_gmemory_prompt == prompt
+    assert agent.visible_gmemory_prompt == ""
+    assert agent.gmemory_prompt == ""
+    assert diagnostics["memory_injected_to_prompt"] is False
+    assert intervention["retrieved_but_not_injected"] is True
+    assert intervention["injection_events"] == []
+    json.dumps(diagnostics)
+    print("PASS phase0 intervention diagnostics and compat prompt state")
 
 
 def check_goal_contract_parser():
@@ -709,6 +750,7 @@ def check_v3_state_action_refinement():
 
 def main():
     check_disabled_path_uses_legacy_filter()
+    check_phase0_intervention_diagnostics_and_compat_prompt_state()
     check_goal_contract_parser()
     check_insight_split()
     check_instruction_preamble_filtered()

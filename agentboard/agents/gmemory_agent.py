@@ -56,9 +56,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
         self.gmemory_memory_only = bool(self.gmemory_config.get("memory_only", False))
         self.gmemory_goal_contract_gate_config = self.gmemory_config.get("goal_contract_gate", {}) or {}
+        self.gmemory_need_aware_intervention_config = self.gmemory_config.get("need_aware_intervention", {}) or {}
         self.current_task_type = ""
+        self.cached_gmemory_prompt = ""
+        self.visible_gmemory_prompt = ""
         self.gmemory_prompt = ""
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
+        self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
         self.gmemory_client = self._build_gmemory_client()
 
     def set_current_task_type(self, task_type: Optional[str]) -> None:
@@ -76,8 +80,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
 
     def reset(self, goal, init_obs, init_act=None):
         super().reset(goal, init_obs, init_act)
-        self.gmemory_prompt = ""
+        self._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=None)
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
+        self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
         if not self.gmemory_enabled or not self.gmemory_recall_on_reset or self.gmemory_client is None:
             return
         try:
@@ -94,21 +99,23 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 prepared_prompt = self._prepare_gmemory_prompt_for_gate(raw_prompt)
                 if self._goal_contract_gate_diagnostics_only():
                     self._diagnose_gmemory_prompt_per_insight(prepared_prompt)
-                    self.gmemory_prompt = self._limit_gmemory_prompt_chars(prepared_prompt)
+                    final_prompt = self._limit_gmemory_prompt_chars(prepared_prompt)
                 else:
                     gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
-                    self.gmemory_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
+                    final_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
+                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=final_prompt, retrieve_step=0)
                 self.gmemory_gate_diagnostics["final_memory_chars"] = len(self.gmemory_prompt)
                 self.gmemory_gate_diagnostics["final_memory_prompt"] = self.gmemory_prompt
                 self.gmemory_gate_diagnostics["memory_injected"] = bool(self.gmemory_prompt)
             else:
-                self.gmemory_prompt = self._filter_gmemory_prompt(raw_prompt)
+                final_prompt = self._filter_gmemory_prompt(raw_prompt)
+                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=final_prompt, retrieve_step=0)
             logger.info(
                 "GMemory retrieve completed: memory_prompt_chars=%s",
                 len(self.gmemory_prompt),
             )
         except Exception as exc:
-            self.gmemory_prompt = ""
+            self._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=None)
             logger.warning("GMemory retrieve failed: %s", exc)
 
     def make_prompt(self, need_goal=False, check_actions="check valid actions", check_inventory="inventory", system_message=''):
@@ -172,6 +179,67 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
 
     def _goal_contract_gate_state_finalization_action(self) -> str:
         return str(self.gmemory_goal_contract_gate_config.get("state_finalization_missing_action", "diagnostic")).strip()
+
+    def _need_aware_intervention_enabled(self) -> bool:
+        return bool(self.gmemory_need_aware_intervention_config.get("enabled", False))
+
+    def _need_aware_intervention_mode(self) -> str:
+        return str(self.gmemory_need_aware_intervention_config.get("mode", "disabled")).strip() or "disabled"
+
+    def _empty_intervention_diagnostics(self) -> Dict[str, Any]:
+        return {
+            "enabled": self._need_aware_intervention_enabled()
+            if hasattr(self, "gmemory_need_aware_intervention_config")
+            else False,
+            "mode": self._need_aware_intervention_mode()
+            if hasattr(self, "gmemory_need_aware_intervention_config")
+            else "disabled",
+            "retrieved": False,
+            "cached": False,
+            "injected": False,
+            "visible": False,
+            "retrieved_but_not_injected": False,
+            "retrieve_step": None,
+            "injection_events": [],
+            "clear_events": [],
+            "current_visible_ttl_remaining": None,
+            "current_cooldown_remaining": None,
+            "cached_memory_chars": 0,
+            "visible_memory_chars": 0,
+        }
+
+    def _set_gmemory_prompt_state(
+        self,
+        cached_prompt: str,
+        visible_prompt: str,
+        retrieve_step: Optional[int],
+    ) -> None:
+        self.cached_gmemory_prompt = cached_prompt or ""
+        self.visible_gmemory_prompt = visible_prompt or ""
+        self.gmemory_prompt = self.visible_gmemory_prompt
+        diagnostics = self._empty_intervention_diagnostics()
+        diagnostics.update(
+            {
+                "retrieved": retrieve_step is not None,
+                "cached": bool(self.cached_gmemory_prompt),
+                "injected": bool(self.visible_gmemory_prompt),
+                "visible": bool(self.visible_gmemory_prompt),
+                "retrieved_but_not_injected": bool(self.cached_gmemory_prompt)
+                and not bool(self.visible_gmemory_prompt),
+                "retrieve_step": retrieve_step,
+                "cached_memory_chars": len(self.cached_gmemory_prompt),
+                "visible_memory_chars": len(self.visible_gmemory_prompt),
+            }
+        )
+        if self.visible_gmemory_prompt:
+            diagnostics["injection_events"] = [
+                {
+                    "step": retrieve_step,
+                    "reason": "reset_time_immediate",
+                    "memory_chars": len(self.visible_gmemory_prompt),
+                }
+            ]
+        self.gmemory_intervention_diagnostics = diagnostics
 
     def _empty_gate_diagnostics(self) -> Dict[str, Any]:
         return {
@@ -1067,6 +1135,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "gmemory_prompt_chars": len(getattr(self, "gmemory_prompt", "") or ""),
             "memory_injected_to_prompt": bool(getattr(self, "gmemory_prompt", "") or ""),
             "gmemory_gate": self.gmemory_gate_diagnostics,
+            "gmemory_intervention": self.gmemory_intervention_diagnostics,
         }
 
     def _current_history_marker(self) -> Optional[str]:
