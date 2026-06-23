@@ -30,7 +30,17 @@ def load_gmemory_agent_class():
     return module.GMemoryContextEfficientAgent
 
 
+def load_stage3_analysis_module():
+    module_path = os.path.join(PROJECT_ROOT, "scripts", "analyze_stage3_need_aware_intervention.py")
+    spec = importlib.util.spec_from_file_location("analyze_stage3_need_aware_intervention", module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["analyze_stage3_need_aware_intervention"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 GMemoryContextEfficientAgent = load_gmemory_agent_class()
+stage3_analysis = load_stage3_analysis_module()
 
 
 class FakeLLM:
@@ -318,6 +328,78 @@ def check_phase11_query_action_loop_trigger():
     assert ratio_diag["query_action_loop_trigger"] is False
     assert ratio_diag["last_decision"]["trigger_condition_satisfied"] is False
     print("PASS phase1.1 query action loop trigger")
+
+
+def check_phase2_stage3_analysis_metrics():
+    fake_records = [
+        {
+            "id": 0,
+            "task_name": "pick_clean_then_place_in_recep-Plate-None-CounterTop-10",
+            "is_done": False,
+            "progress_rate": 0.5,
+            "agent_diagnostics": {
+                "gmemory_intervention": {
+                    "retrieved": True,
+                    "cached": True,
+                    "visible": False,
+                    "retrieved_but_not_injected": False,
+                    "injection_events": [
+                        {
+                            "step": 2,
+                            "trigger_reason": "nothing_happens",
+                            "post_injection_progress_delta": 0.5,
+                            "delta_within_ttl": 0.25,
+                            "delta_within_ttl_plus_3": 0.5,
+                            "eventual_delta_after_injection": 0.5,
+                        }
+                    ],
+                    "clear_events": [{"step": 4, "reason": "ttl_expired"}],
+                    "metrics": {
+                        "cooldown_block_count": 1,
+                        "trigger_no_cached_memory_count": 0,
+                        "trigger_no_usable_memory_count": 0,
+                        "stuck_trigger_count": 2,
+                    },
+                },
+                "alfworld_action_stats": {"check_valid_actions_count": 3, "nothing_happens_count": 2},
+            },
+        },
+        {
+            "id": 1,
+            "task_name": "pick_cool_then_place_in_recep-Lettuce-None-CounterTop-10",
+            "is_done": False,
+            "progress_rate": 0.0,
+            "agent_diagnostics": {
+                "gmemory_intervention": {
+                    "retrieved": True,
+                    "cached": True,
+                    "visible": False,
+                    "retrieved_but_not_injected": True,
+                    "injection_events": [],
+                    "clear_events": [],
+                    "metrics": {
+                        "cooldown_block_count": 0,
+                        "trigger_no_cached_memory_count": 0,
+                        "trigger_no_usable_memory_count": 0,
+                        "stuck_trigger_count": 0,
+                    },
+                },
+                "alfworld_action_stats": {"check_valid_actions_count": 5, "nothing_happens_count": 0},
+            },
+        },
+    ]
+    analysis = stage3_analysis.analyze_records(fake_records)
+    overall = analysis["overall"]
+    assert overall["episode_count"] == 2
+    assert overall["injected_episode_count"] == 1
+    assert overall["memory_injection_rate"] == 0.5
+    assert overall["recovery_success_rate"] == 1.0
+    assert overall["retrieved_but_not_visible_count"] == 1
+    assert overall["avg_delta_within_ttl"] == 0.25
+    assert overall["avg_delta_within_ttl_plus_3"] == 0.5
+    assert analysis["by_task_type"]["clean"]["injected_episode_count"] == 1
+    assert analysis["by_task_type"]["cool"]["injected_episode_count"] == 0
+    print("PASS phase2 stage3 analysis metrics")
 
 
 def check_goal_contract_parser():
@@ -937,6 +1019,7 @@ def main():
     check_phase1_trigger_ttl_cooldown_and_progress_delta()
     check_phase1_trigger_skip_reasons()
     check_phase11_query_action_loop_trigger()
+    check_phase2_stage3_analysis_metrics()
     check_goal_contract_parser()
     check_insight_split()
     check_instruction_preamble_filtered()
