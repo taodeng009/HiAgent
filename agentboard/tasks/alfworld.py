@@ -41,7 +41,9 @@ class Evalalfworld(BaseTask):
                  env_config=None,
                  llm = None,
                  baseline_dir = None,
-                 log_path = None
+                 log_path = None,
+                 start_index = 0,
+                 end_index = None
                  ):
         
         super().__init__()
@@ -57,6 +59,10 @@ class Evalalfworld(BaseTask):
         self.env_cfg = env_config
         self.max_num_steps = max_num_steps
         self.num_exams = num_exams
+        self.start_index = max(0, int(start_index or 0))
+        self.end_index = None if end_index is None else int(end_index)
+        if self.end_index is not None and self.end_index < self.start_index:
+            raise ValueError("ALFWorld end_index must be >= start_index for an inclusive task range.")
         self.target_task_types, self.target_task_limits = self._parse_target_task_filter(env_config)
 
         self.baseline_dir = baseline_dir
@@ -319,9 +325,19 @@ class Evalalfworld(BaseTask):
         difficulties = []
         target_task_counts = {}
 
-        for id in range(self.num_exams):
+        # start_index/end_index select global ALFWorld task ids using a closed
+        # interval: [start_index, end_index]. Logged ids remain global ids.
+        eval_stop = self.num_exams
+        if self.end_index is not None:
+            eval_stop = max(eval_stop, self.end_index + 1)
+        for id in range(eval_stop):
 
             ob, info = self.env.reset()
+            if id < self.start_index:
+                continue
+            if self.end_index is not None and id > self.end_index:
+                break
+
             ob = '\n'.join(ob[0].split('\n\n')[1:])
             name = '/'.join(info['extra.gamefile'][0].split('/')[-3:-1])
             #sub_goal = selected_obs[name]
@@ -402,6 +418,10 @@ class Evalalfworld(BaseTask):
         # wandb = run_config.get("wandb", False)
         num_exams = run_config.get("num_exam", 134)
         log_path = run_config.get("log_path", None)
+        # Optional closed interval over global ALFWorld task ids.
+        # Example: start_index=80, end_index=109 evaluates ids 80..109.
+        start_index = run_config.get("start_index", 0)
+        end_index = run_config.get("end_index", None)
         return cls(
                    llm_config=llm_config,
                    agent_name=agent_name,
@@ -412,5 +432,7 @@ class Evalalfworld(BaseTask):
                    env_config=env_config,
                    llm = llm,
                    baseline_dir = baseline_dir,
-                   log_path = log_path
+                   log_path = log_path,
+                   start_index = start_index,
+                   end_index = end_index
                    )

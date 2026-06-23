@@ -370,6 +370,14 @@ def check_phase21_task_start_ttl_then_stuck_reactivation():
     assert diagnostics["injection_events"][-1]["phase"] == "task_start"
     assert diagnostics["current_visible_ttl_remaining"] == 2
     assert diagnostics["metrics"]["task_start_injection_count"] == 1
+    prompt = agent.make_prompt(
+        need_goal=True,
+        check_actions="check valid actions",
+        check_inventory="inventory",
+    )
+    assert "## Key Insights from Related Tasks" in prompt
+    assert "Find the plate, pick it up, and put it on the countertop." in prompt
+    assert prompt.index("## Key Insights from Related Tasks") < prompt.index("Observation: You are in the middle")
 
     agent.update_intervention_state(
         step_id=0,
