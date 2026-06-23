@@ -72,6 +72,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_injection_events = []
         self.gmemory_clear_events = []
         self.gmemory_active_injection_index = None
+        self.gmemory_interaction_steps = 0
+        self.gmemory_exposure_steps_total = 0
         self.gmemory_stuck_trigger_count = 0
         self.gmemory_cooldown_block_count = 0
         self.gmemory_trigger_no_cached_memory_count = 0
@@ -119,15 +121,43 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 else:
                     gated_prompt = self._gate_gmemory_prompt_per_insight(prepared_prompt)
                     final_prompt = self._limit_gmemory_prompt_chars(gated_prompt)
-                visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
-                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
+                if self._need_aware_task_start_ttl_enabled():
+                    self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt="", retrieve_step=0)
+                    if final_prompt:
+                        self._inject_cached_gmemory(
+                            step_id=-1,
+                            progress_rate=0.0,
+                            trigger_condition_satisfied=False,
+                            reason="task_start_ttl",
+                            phase="task_start",
+                            visible_ttl=self._task_start_visibility_ttl(),
+                            cooldown=self._task_start_reentry_cooldown(),
+                        )
+                        self._refresh_intervention_diagnostics()
+                else:
+                    visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                    self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
                 self.gmemory_gate_diagnostics["final_memory_chars"] = len(final_prompt)
                 self.gmemory_gate_diagnostics["final_memory_prompt"] = final_prompt
                 self.gmemory_gate_diagnostics["memory_injected"] = bool(self.gmemory_prompt)
             else:
                 final_prompt = self._filter_gmemory_prompt(raw_prompt)
-                visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
-                self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
+                if self._need_aware_task_start_ttl_enabled():
+                    self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt="", retrieve_step=0)
+                    if final_prompt:
+                        self._inject_cached_gmemory(
+                            step_id=-1,
+                            progress_rate=0.0,
+                            trigger_condition_satisfied=False,
+                            reason="task_start_ttl",
+                            phase="task_start",
+                            visible_ttl=self._task_start_visibility_ttl(),
+                            cooldown=self._task_start_reentry_cooldown(),
+                        )
+                        self._refresh_intervention_diagnostics()
+                else:
+                    visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                    self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
             logger.info(
                 "GMemory retrieve completed: memory_prompt_chars=%s",
                 len(self.gmemory_prompt),
@@ -210,8 +240,31 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             and self._need_aware_intervention_mode() == "delayed_task_level_memory_injection"
         )
 
+    def _need_aware_task_start_ttl_enabled(self) -> bool:
+        return (
+            self._need_aware_intervention_enabled()
+            and self._need_aware_intervention_mode() == "task_start_ttl_then_stuck_reactivation"
+        )
+
+    def _need_aware_prompt_scheduling_enabled(self) -> bool:
+        return self._delayed_task_level_intervention_enabled() or self._need_aware_task_start_ttl_enabled()
+
     def _intervention_visibility_ttl(self) -> int:
         return max(1, int(self.gmemory_need_aware_intervention_config.get("visibility_ttl", 3)))
+
+    def _stuck_visibility_ttl(self) -> int:
+        return max(
+            1,
+            int(
+                self.gmemory_need_aware_intervention_config.get(
+                    "stuck_visibility_ttl",
+                    self._intervention_visibility_ttl(),
+                )
+            ),
+        )
+
+    def _task_start_visibility_ttl(self) -> int:
+        return max(1, int(self.gmemory_need_aware_intervention_config.get("task_start_visibility_ttl", 2)))
 
     def _intervention_reentry_cooldown(self) -> int:
         return max(
@@ -220,6 +273,17 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 self.gmemory_need_aware_intervention_config.get(
                     "reentry_cooldown_after_clear",
                     self._intervention_visibility_ttl(),
+                )
+            ),
+        )
+
+    def _task_start_reentry_cooldown(self) -> int:
+        return max(
+            0,
+            int(
+                self.gmemory_need_aware_intervention_config.get(
+                    "reentry_cooldown_after_task_start_clear",
+                    self._task_start_visibility_ttl(),
                 )
             ),
         )
@@ -259,6 +323,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_injection_events = []
         self.gmemory_clear_events = []
         self.gmemory_active_injection_index = None
+        self.gmemory_interaction_steps = 0
+        self.gmemory_exposure_steps_total = 0
         self.gmemory_stuck_trigger_count = 0
         self.gmemory_cooldown_block_count = 0
         self.gmemory_trigger_no_cached_memory_count = 0
@@ -313,11 +379,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             self.gmemory_injection_events = []
             self.gmemory_clear_events = []
             self.gmemory_active_injection_index = None
-        if self.visible_gmemory_prompt and not self._delayed_task_level_intervention_enabled() and not self.gmemory_injection_events:
+        if self.visible_gmemory_prompt and not self._need_aware_prompt_scheduling_enabled() and not self.gmemory_injection_events:
             self.gmemory_injection_events.append(
                 {
                     "step": retrieve_step,
                     "reason": "reset_time_immediate",
+                    "phase": "task_start_persistent",
                     "memory_chars": len(self.visible_gmemory_prompt),
                     "progress_at_injection": None,
                     "post_injection_progress_delta": 0.0,
@@ -364,25 +431,62 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         injection_count = len(self.gmemory_injection_events)
         clear_count = len(self.gmemory_clear_events)
         ttl_expired_count = sum(1 for event in self.gmemory_clear_events if event.get("reason") == "ttl_expired")
+        task_start_ttl_expired_count = sum(
+            1 for event in self.gmemory_clear_events if event.get("reason") == "task_start_ttl_expired"
+        )
+        stuck_ttl_expired_count = sum(
+            1
+            for event in self.gmemory_clear_events
+            if event.get("reason") == "ttl_expired" and event.get("phase") == "stuck"
+        )
         post_deltas = [
             float(event.get("post_injection_progress_delta") or 0.0)
             for event in self.gmemory_injection_events
         ]
+        task_start_deltas = [
+            float(event.get("post_injection_progress_delta") or 0.0)
+            for event in self.gmemory_injection_events
+            if event.get("phase") == "task_start"
+        ]
+        stuck_deltas = [
+            float(event.get("post_injection_progress_delta") or 0.0)
+            for event in self.gmemory_injection_events
+            if event.get("phase") == "stuck"
+        ]
+        task_start_injection_count = sum(1 for event in self.gmemory_injection_events if event.get("phase") == "task_start")
+        stuck_reactivation_count = sum(1 for event in self.gmemory_injection_events if event.get("phase") == "stuck")
+        first_stuck_reactivation_step = next(
+            (event.get("step") for event in self.gmemory_injection_events if event.get("phase") == "stuck"),
+            None,
+        )
         recovered_events = sum(1 for delta in post_deltas if delta > 0)
         retrieved_but_not_injected = bool(self.cached_gmemory_prompt) and injection_count == 0
         return {
             "memory_injection_count": injection_count,
             "memory_injection_rate": 1.0 if injection_count > 0 else 0.0,
+            "task_start_injection_count": task_start_injection_count,
+            "stuck_reactivation_count": stuck_reactivation_count,
             "stuck_trigger_count": self.gmemory_stuck_trigger_count,
             "retrieved_but_not_injected_count": 1 if retrieved_but_not_injected else 0,
             "post_injection_progress_delta": max(post_deltas) if post_deltas else None,
+            "post_task_start_progress_delta": max(task_start_deltas) if task_start_deltas else None,
+            "post_stuck_reactivation_progress_delta": max(stuck_deltas) if stuck_deltas else None,
             "recovery_success_rate": recovered_events / injection_count if injection_count else None,
             "memory_harm_proxy": any(delta < 0 for delta in post_deltas),
             "ttl_expired_count": ttl_expired_count,
+            "task_start_ttl_expired_count": task_start_ttl_expired_count,
+            "stuck_ttl_expired_count": stuck_ttl_expired_count,
             "cooldown_block_count": self.gmemory_cooldown_block_count,
             "trigger_no_cached_memory_count": self.gmemory_trigger_no_cached_memory_count,
             "trigger_no_usable_memory_count": self.gmemory_trigger_no_usable_memory_count,
             "visible_clear_count": clear_count,
+            "first_stuck_reactivation_step": first_stuck_reactivation_step,
+            "memory_exposure_steps_total": self.gmemory_exposure_steps_total,
+            "memory_exposure_rate": (
+                self.gmemory_exposure_steps_total / self.gmemory_interaction_steps
+                if self.gmemory_interaction_steps
+                else 0.0
+            ),
         }
 
     def _query_action_count_since_last_progress(self) -> int:
@@ -458,13 +562,25 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "cooldown_remaining": self.gmemory_cooldown_remaining,
         }
 
-    def _inject_cached_gmemory(self, step_id: int, progress_rate: float, trigger_condition_satisfied: bool) -> None:
+    def _inject_cached_gmemory(
+        self,
+        step_id: int,
+        progress_rate: float,
+        trigger_condition_satisfied: bool,
+        reason: str = "stuck_trigger",
+        phase: str = "stuck",
+        visible_ttl: Optional[int] = None,
+        cooldown: Optional[int] = None,
+    ) -> None:
         self.visible_gmemory_prompt = self.cached_gmemory_prompt
         self.gmemory_prompt = self.visible_gmemory_prompt
-        self.gmemory_visible_ttl_remaining = self._intervention_visibility_ttl()
+        effective_ttl = visible_ttl if visible_ttl is not None else self._stuck_visibility_ttl()
+        effective_cooldown = cooldown if cooldown is not None else self._intervention_reentry_cooldown()
+        self.gmemory_visible_ttl_remaining = effective_ttl
         event = {
             "step": step_id,
-            "reason": "stuck_trigger",
+            "reason": reason,
+            "phase": phase,
             "memory_chars": len(self.visible_gmemory_prompt),
             "progress_at_injection": progress_rate,
             "post_injection_progress_delta": 0.0,
@@ -473,7 +589,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "eventual_delta_after_injection": 0.0,
             "progress_during_visibility_count": 0,
             "visible_ttl": self.gmemory_visible_ttl_remaining,
-            "cooldown": self._intervention_reentry_cooldown(),
+            "cooldown": effective_cooldown,
             "trigger_condition_satisfied": trigger_condition_satisfied,
             "stale_steps_since_last_progress": self.gmemory_stale_steps_since_last_progress,
             "nothing_happens_count_since_last_progress": self.gmemory_nothing_happens_since_last_progress,
@@ -511,6 +627,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if not self.visible_gmemory_prompt:
             return
         progress_delta = 0.0
+        event = {}
         if self.gmemory_active_injection_index is not None:
             event = self.gmemory_injection_events[self.gmemory_active_injection_index]
             progress_delta = progress_rate - float(event.get("progress_at_injection") or 0.0)
@@ -519,6 +636,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             {
                 "step": step_id,
                 "reason": reason,
+                "phase": event.get("phase") if event else None,
                 "progress_delta_since_injection": progress_delta,
                 "visible_steps": step_id - int(event.get("step") or step_id) if self.gmemory_active_injection_index is not None else 0,
                 "progress_during_visibility_count": int(event.get("progress_during_visibility_count") or 0)
@@ -529,7 +647,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.visible_gmemory_prompt = ""
         self.gmemory_prompt = ""
         self.gmemory_visible_ttl_remaining = None
-        self.gmemory_cooldown_remaining = self._intervention_reentry_cooldown()
+        self.gmemory_cooldown_remaining = int(event.get("cooldown") or self._intervention_reentry_cooldown()) if event else self._intervention_reentry_cooldown()
         self.gmemory_active_injection_index = None
 
     def update_intervention_state(
@@ -543,11 +661,14 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         nothing_happens: bool,
         is_check_valid_actions: bool,
     ) -> None:
-        if not self._delayed_task_level_intervention_enabled():
+        if not self._need_aware_prompt_scheduling_enabled():
             self._refresh_intervention_diagnostics()
             return
 
+        self.gmemory_interaction_steps += 1
         memory_visible_at_step = bool(self.visible_gmemory_prompt)
+        if memory_visible_at_step:
+            self.gmemory_exposure_steps_total += 1
         progress_improved = progress_rate > previous_progress_rate
         if progress_improved:
             self.gmemory_stale_steps_since_last_progress = 0
@@ -603,7 +724,15 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             else:
                 skip_reason = "none"
                 allowed = True
-                self._inject_cached_gmemory(step_id, progress_rate, trigger_condition_satisfied)
+                self._inject_cached_gmemory(
+                    step_id,
+                    progress_rate,
+                    trigger_condition_satisfied,
+                    reason="stuck_reactivation" if self._need_aware_task_start_ttl_enabled() else "stuck_trigger",
+                    phase="stuck",
+                    visible_ttl=self._stuck_visibility_ttl(),
+                    cooldown=self._intervention_reentry_cooldown(),
+                )
             self._record_intervention_decision(
                 trigger_condition_satisfied=trigger_condition_satisfied,
                 intervention_allowed=allowed,
@@ -629,7 +758,13 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         if memory_visible_at_step and self.gmemory_visible_ttl_remaining is not None:
             self.gmemory_visible_ttl_remaining = max(0, self.gmemory_visible_ttl_remaining - 1)
             if self.gmemory_visible_ttl_remaining == 0:
-                self._clear_visible_gmemory(step_id, "ttl_expired", progress_rate)
+                active_event = (
+                    self.gmemory_injection_events[self.gmemory_active_injection_index]
+                    if self.gmemory_active_injection_index is not None
+                    else {}
+                )
+                clear_reason = "task_start_ttl_expired" if active_event.get("phase") == "task_start" else "ttl_expired"
+                self._clear_visible_gmemory(step_id, clear_reason, progress_rate)
         elif not memory_visible_at_step and self.gmemory_cooldown_remaining > 0:
             self.gmemory_cooldown_remaining = max(0, self.gmemory_cooldown_remaining - 1)
 

@@ -175,6 +175,28 @@ def make_delayed_agent(**overrides):
     return make_agent(mode="per_insight_task_type_rule_v3", need_aware_intervention=config)
 
 
+def make_task_start_ttl_agent(**overrides):
+    config = {
+        "enabled": True,
+        "mode": "task_start_ttl_then_stuck_reactivation",
+        "task_start_visibility_ttl": 2,
+        "visibility_ttl": 2,
+        "stuck_visibility_ttl": 2,
+        "reentry_cooldown_after_task_start_clear": 2,
+        "reentry_cooldown_after_clear": 2,
+        "stale_steps_since_last_progress": 2,
+        "failure_observation_threshold": 2,
+        "require_check_valid_actions_since_progress": True,
+        "failure_signal_policy": "nothing_happens_or_query_action_loop",
+        "query_action_loop_count_threshold": 2,
+        "query_action_loop_ratio_threshold": 0.6,
+        "refresh_ttl_on_progress": False,
+        "clear_on_progress": False,
+    }
+    config.update(overrides)
+    return make_agent(mode="per_insight_task_type_rule_v3", need_aware_intervention=config)
+
+
 def drive_no_progress_step(agent, step, action="go to desk 1", observation="Nothing happens."):
     agent.update_intervention_state(
         step_id=step,
@@ -330,6 +352,98 @@ def check_phase11_query_action_loop_trigger():
     print("PASS phase1.1 query action loop trigger")
 
 
+def check_phase21_task_start_ttl_then_stuck_reactivation():
+    os.environ.setdefault("EVALTASK", "alfworld")
+    memory_prompt = (
+        "## Key Insights from Related Tasks\n"
+        "1. Find the plate, pick it up, and put it on the countertop."
+    )
+    agent = make_task_start_ttl_agent()
+    agent.set_current_task_type("place")
+    agent.gmemory_client = FakeGMemoryClient(memory_prompt)
+    agent.reset(goal="put a plate in countertop.", init_obs="You are in the middle of a room.")
+
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.cached_gmemory_prompt.startswith("## Key Insights from Related Tasks")
+    assert agent.visible_gmemory_prompt == agent.cached_gmemory_prompt
+    assert diagnostics["injection_events"][-1]["reason"] == "task_start_ttl"
+    assert diagnostics["injection_events"][-1]["phase"] == "task_start"
+    assert diagnostics["current_visible_ttl_remaining"] == 2
+    assert diagnostics["metrics"]["task_start_injection_count"] == 1
+
+    agent.update_intervention_state(
+        step_id=0,
+        executed_action="go to countertop 1",
+        observation="On the countertop 1, you see a plate 1.",
+        progress_rate=0.25,
+        previous_progress_rate=0.0,
+        is_valid_action=True,
+        nothing_happens=False,
+        is_check_valid_actions=False,
+    )
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["current_visible_ttl_remaining"] == 1
+    assert diagnostics["metrics"]["post_task_start_progress_delta"] == 0.25
+    assert diagnostics["metrics"]["memory_exposure_steps_total"] == 1
+
+    agent.update_intervention_state(
+        step_id=1,
+        executed_action="take plate 1 from countertop 1",
+        observation="You pick up the plate 1 from the countertop 1.",
+        progress_rate=0.5,
+        previous_progress_rate=0.25,
+        is_valid_action=True,
+        nothing_happens=False,
+        is_check_valid_actions=False,
+    )
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.visible_gmemory_prompt == ""
+    assert diagnostics["clear_events"][-1]["reason"] == "task_start_ttl_expired"
+    assert diagnostics["clear_events"][-1]["phase"] == "task_start"
+    assert diagnostics["current_cooldown_remaining"] == 2
+    assert diagnostics["metrics"]["task_start_ttl_expired_count"] == 1
+    assert diagnostics["metrics"]["memory_exposure_steps_total"] == 2
+
+    drive_no_progress_step(agent, 2, action="check valid actions")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["last_decision"]["skip_reason"] == "reentry_cooldown"
+    assert diagnostics["last_decision"]["would_trigger"] is False
+    assert agent.visible_gmemory_prompt == ""
+
+    drive_no_progress_step(agent, 3, action="check valid actions")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["last_decision"]["skip_reason"] == "reentry_cooldown"
+    assert diagnostics["last_decision"]["would_trigger"] is True
+    assert diagnostics["current_cooldown_remaining"] == 0
+    assert agent.visible_gmemory_prompt == ""
+
+    drive_no_progress_step(agent, 4, action="check valid actions")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.visible_gmemory_prompt == agent.cached_gmemory_prompt
+    assert diagnostics["injection_events"][-1]["reason"] == "stuck_reactivation"
+    assert diagnostics["injection_events"][-1]["phase"] == "stuck"
+    assert diagnostics["metrics"]["stuck_reactivation_count"] == 1
+    assert diagnostics["metrics"]["first_stuck_reactivation_step"] == 4
+    print("PASS phase2.1 task-start ttl then stuck reactivation")
+
+
+def check_phase21_no_usable_memory_skips_task_start_visibility():
+    agent = make_task_start_ttl_agent()
+    agent.set_current_task_type("puttwo")
+    agent.gmemory_client = FakeGMemoryClient(
+        "## Key Insights from Related Tasks\n"
+        "1. Find one object and put it in the target, because this completes the immediate goal."
+    )
+    agent.reset(goal="put two cd in safe.", init_obs="You are in the middle of a room.")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert agent.cached_gmemory_prompt == ""
+    assert agent.visible_gmemory_prompt == ""
+    assert diagnostics["cached"] is False
+    assert diagnostics["visible"] is False
+    assert diagnostics["injection_events"] == []
+    print("PASS phase2.1 no usable memory skips task-start visibility")
+
+
 def check_phase2_stage3_analysis_metrics():
     fake_records = [
         {
@@ -346,6 +460,7 @@ def check_phase2_stage3_analysis_metrics():
                     "injection_events": [
                         {
                             "step": 2,
+                            "phase": "stuck",
                             "trigger_reason": "nothing_happens",
                             "post_injection_progress_delta": 0.5,
                             "delta_within_ttl": 0.25,
@@ -387,18 +502,60 @@ def check_phase2_stage3_analysis_metrics():
                 "alfworld_action_stats": {"check_valid_actions_count": 5, "nothing_happens_count": 0},
             },
         },
+        {
+            "id": 2,
+            "task_name": "pick_and_place_simple-Plate-None-CounterTop-10",
+            "is_done": True,
+            "progress_rate": 1.0,
+            "agent_diagnostics": {
+                "gmemory_intervention": {
+                    "retrieved": True,
+                    "cached": True,
+                    "visible": False,
+                    "retrieved_but_not_injected": False,
+                    "injection_events": [
+                        {
+                            "step": -1,
+                            "phase": "task_start",
+                            "reason": "task_start_ttl",
+                            "post_injection_progress_delta": 1.0,
+                            "delta_within_ttl": 0.5,
+                            "delta_within_ttl_plus_3": 1.0,
+                            "eventual_delta_after_injection": 1.0,
+                        }
+                    ],
+                    "clear_events": [{"step": 1, "reason": "task_start_ttl_expired", "phase": "task_start"}],
+                    "metrics": {
+                        "cooldown_block_count": 0,
+                        "trigger_no_cached_memory_count": 0,
+                        "trigger_no_usable_memory_count": 0,
+                        "stuck_trigger_count": 0,
+                        "memory_exposure_steps_total": 2,
+                        "memory_exposure_rate": 0.5,
+                    },
+                },
+                "alfworld_action_stats": {"check_valid_actions_count": 0, "nothing_happens_count": 0},
+            },
+        },
     ]
     analysis = stage3_analysis.analyze_records(fake_records)
     overall = analysis["overall"]
-    assert overall["episode_count"] == 2
-    assert overall["injected_episode_count"] == 1
-    assert overall["memory_injection_rate"] == 0.5
+    assert overall["episode_count"] == 3
+    assert overall["injected_episode_count"] == 2
+    assert overall["task_start_injected_episode_count"] == 1
+    assert overall["stuck_reactivation_episode_count"] == 1
+    assert overall["memory_injection_rate"] == 2 / 3
     assert overall["recovery_success_rate"] == 1.0
     assert overall["retrieved_but_not_visible_count"] == 1
-    assert overall["avg_delta_within_ttl"] == 0.25
-    assert overall["avg_delta_within_ttl_plus_3"] == 0.5
+    assert overall["avg_delta_within_ttl"] == 0.375
+    assert overall["avg_post_task_start_progress_delta"] == 1.0
+    assert overall["avg_post_stuck_reactivation_progress_delta"] == 0.5
+    assert overall["task_start_ttl_expired_count"] == 1
+    assert overall["memory_exposure_steps_total"] == 2
+    assert overall["avg_memory_exposure_rate"] == 1 / 6
     assert analysis["by_task_type"]["clean"]["injected_episode_count"] == 1
     assert analysis["by_task_type"]["cool"]["injected_episode_count"] == 0
+    assert analysis["by_task_type"]["place"]["task_start_injected_episode_count"] == 1
     print("PASS phase2 stage3 analysis metrics")
 
 
@@ -1019,6 +1176,8 @@ def main():
     check_phase1_trigger_ttl_cooldown_and_progress_delta()
     check_phase1_trigger_skip_reasons()
     check_phase11_query_action_loop_trigger()
+    check_phase21_task_start_ttl_then_stuck_reactivation()
+    check_phase21_no_usable_memory_skips_task_start_visibility()
     check_phase2_stage3_analysis_metrics()
     check_goal_contract_parser()
     check_insight_split()

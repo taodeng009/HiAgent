@@ -57,6 +57,16 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
     ttl_deltas = [float(event.get("delta_within_ttl") or 0.0) for event in injection_events]
     ttl_plus_3_deltas = [float(event.get("delta_within_ttl_plus_3") or 0.0) for event in injection_events]
     eventual_deltas = [float(event.get("eventual_delta_after_injection") or 0.0) for event in injection_events]
+    task_start_events = [event for event in injection_events if event.get("phase") == "task_start"]
+    stuck_events = [event for event in injection_events if event.get("phase") == "stuck"]
+    task_start_deltas = [
+        float(event.get("post_injection_progress_delta") or 0.0)
+        for event in task_start_events
+    ]
+    stuck_deltas = [
+        float(event.get("post_injection_progress_delta") or 0.0)
+        for event in stuck_events
+    ]
     return {
         "id": record.get("id"),
         "task_name": record.get("task_name", ""),
@@ -68,18 +78,35 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
         "visible_final": bool(intervention.get("visible")),
         "retrieved_but_not_visible": bool(intervention.get("retrieved_but_not_injected")),
         "injection_count": len(injection_events),
+        "task_start_injection_count": len(task_start_events),
+        "stuck_reactivation_count": len(stuck_events),
         "clear_count": len(clear_events),
-        "ttl_expired_count": sum(1 for event in clear_events if event.get("reason") == "ttl_expired"),
+        "ttl_expired_count": sum(1 for event in clear_events if str(event.get("reason") or "").endswith("ttl_expired")),
+        "task_start_ttl_expired_count": sum(
+            1 for event in clear_events if event.get("reason") == "task_start_ttl_expired"
+        ),
+        "stuck_ttl_expired_count": sum(
+            1
+            for event in clear_events
+            if event.get("reason") == "ttl_expired" and event.get("phase") == "stuck"
+        ),
         "cooldown_block_count": int(metrics.get("cooldown_block_count") or 0),
         "trigger_no_cached_memory_count": int(metrics.get("trigger_no_cached_memory_count") or 0),
         "trigger_no_usable_memory_count": int(metrics.get("trigger_no_usable_memory_count") or 0),
         "stuck_trigger_count": int(metrics.get("stuck_trigger_count") or 0),
         "post_injection_progress_delta": max(deltas) if deltas else None,
+        "post_task_start_progress_delta": max(task_start_deltas) if task_start_deltas else None,
+        "post_stuck_reactivation_progress_delta": max(stuck_deltas) if stuck_deltas else None,
         "delta_within_ttl": max(ttl_deltas) if ttl_deltas else None,
         "delta_within_ttl_plus_3": max(ttl_plus_3_deltas) if ttl_plus_3_deltas else None,
         "eventual_delta_after_injection": max(eventual_deltas) if eventual_deltas else None,
         "recovery_success": any(delta > 0 for delta in deltas),
+        "task_start_progress_success": any(delta > 0 for delta in task_start_deltas),
+        "stuck_recovery_success": any(delta > 0 for delta in stuck_deltas),
         "memory_harm_proxy": any(delta < 0 for delta in deltas),
+        "memory_exposure_steps_total": int(metrics.get("memory_exposure_steps_total") or 0),
+        "memory_exposure_rate": float(metrics.get("memory_exposure_rate") or 0.0),
+        "first_stuck_reactivation_step": metrics.get("first_stuck_reactivation_step"),
         "trigger_reasons": [event.get("trigger_reason") or event.get("reason", "") for event in injection_events],
         "nothing_happens_count": int(action_stats.get("nothing_happens_count") or 0),
         "check_valid_actions_count": int(action_stats.get("check_valid_actions_count") or 0),
@@ -89,6 +116,8 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
 def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
     total = len(summaries)
     injection_episodes = [row for row in summaries if row["injection_count"] > 0]
+    task_start_episodes = [row for row in summaries if row["task_start_injection_count"] > 0]
+    stuck_reactivation_episodes = [row for row in summaries if row["stuck_reactivation_count"] > 0]
     injected_events = sum(row["injection_count"] for row in summaries)
     return {
         "episode_count": total,
@@ -97,9 +126,17 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         "visible_final_count": sum(1 for row in summaries if row["visible_final"]),
         "retrieved_but_not_visible_count": sum(1 for row in summaries if row["retrieved_but_not_visible"]),
         "injected_episode_count": len(injection_episodes),
+        "task_start_injected_episode_count": len(task_start_episodes),
+        "stuck_reactivation_episode_count": len(stuck_reactivation_episodes),
         "memory_injection_rate": len(injection_episodes) / total if total else 0.0,
+        "task_start_injection_rate": len(task_start_episodes) / total if total else 0.0,
+        "stuck_reactivation_rate": len(stuck_reactivation_episodes) / total if total else 0.0,
         "injected_event_count": injected_events,
+        "task_start_injected_event_count": sum(row["task_start_injection_count"] for row in summaries),
+        "stuck_reactivation_event_count": sum(row["stuck_reactivation_count"] for row in summaries),
         "ttl_expired_count": sum(row["ttl_expired_count"] for row in summaries),
+        "task_start_ttl_expired_count": sum(row["task_start_ttl_expired_count"] for row in summaries),
+        "stuck_ttl_expired_count": sum(row["stuck_ttl_expired_count"] for row in summaries),
         "cooldown_block_count": sum(row["cooldown_block_count"] for row in summaries),
         "trigger_no_cached_memory_count": sum(row["trigger_no_cached_memory_count"] for row in summaries),
         "trigger_no_usable_memory_count": sum(row["trigger_no_usable_memory_count"] for row in summaries),
@@ -109,6 +146,16 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
             if injection_episodes
             else None
         ),
+        "task_start_progress_success_rate": (
+            sum(1 for row in task_start_episodes if row["task_start_progress_success"]) / len(task_start_episodes)
+            if task_start_episodes
+            else None
+        ),
+        "stuck_recovery_success_rate": (
+            sum(1 for row in stuck_reactivation_episodes if row["stuck_recovery_success"]) / len(stuck_reactivation_episodes)
+            if stuck_reactivation_episodes
+            else None
+        ),
         "memory_harm_proxy_rate": (
             sum(1 for row in injection_episodes if row["memory_harm_proxy"]) / len(injection_episodes)
             if injection_episodes
@@ -116,6 +163,16 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         ),
         "avg_post_injection_progress_delta": _avg(
             row["post_injection_progress_delta"] for row in injection_episodes if row["post_injection_progress_delta"] is not None
+        ),
+        "avg_post_task_start_progress_delta": _avg(
+            row["post_task_start_progress_delta"]
+            for row in task_start_episodes
+            if row["post_task_start_progress_delta"] is not None
+        ),
+        "avg_post_stuck_reactivation_progress_delta": _avg(
+            row["post_stuck_reactivation_progress_delta"]
+            for row in stuck_reactivation_episodes
+            if row["post_stuck_reactivation_progress_delta"] is not None
         ),
         "avg_delta_within_ttl": _avg(
             row["delta_within_ttl"] for row in injection_episodes if row["delta_within_ttl"] is not None
@@ -127,6 +184,8 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
             row["eventual_delta_after_injection"] for row in injection_episodes if row["eventual_delta_after_injection"] is not None
         ),
         "avg_check_valid_actions_count": _avg(row["check_valid_actions_count"] for row in summaries),
+        "memory_exposure_steps_total": sum(row["memory_exposure_steps_total"] for row in summaries),
+        "avg_memory_exposure_rate": _avg(row["memory_exposure_rate"] for row in summaries),
     }
 
 
