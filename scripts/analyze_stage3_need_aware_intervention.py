@@ -94,6 +94,9 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
         "trigger_no_cached_memory_count": int(metrics.get("trigger_no_cached_memory_count") or 0),
         "trigger_no_usable_memory_count": int(metrics.get("trigger_no_usable_memory_count") or 0),
         "stuck_trigger_count": int(metrics.get("stuck_trigger_count") or 0),
+        "ineffective_reactivation_streak": int(metrics.get("ineffective_reactivation_streak") or 0),
+        "effective_reactivation_count": int(metrics.get("effective_reactivation_count") or 0),
+        "suppressed_reactivation_count": int(metrics.get("suppressed_reactivation_count") or 0),
         "post_injection_progress_delta": max(deltas) if deltas else None,
         "post_task_start_progress_delta": max(task_start_deltas) if task_start_deltas else None,
         "post_stuck_reactivation_progress_delta": max(stuck_deltas) if stuck_deltas else None,
@@ -141,6 +144,12 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         "trigger_no_cached_memory_count": sum(row["trigger_no_cached_memory_count"] for row in summaries),
         "trigger_no_usable_memory_count": sum(row["trigger_no_usable_memory_count"] for row in summaries),
         "stuck_trigger_count": sum(row["stuck_trigger_count"] for row in summaries),
+        "ineffective_reactivation_streak_total": sum(row["ineffective_reactivation_streak"] for row in summaries),
+        "effective_reactivation_count": sum(row["effective_reactivation_count"] for row in summaries),
+        "suppressed_reactivation_count": sum(row["suppressed_reactivation_count"] for row in summaries),
+        "suppressed_reactivation_episode_count": sum(
+            1 for row in summaries if row["suppressed_reactivation_count"] > 0
+        ),
         "recovery_success_rate": (
             sum(1 for row in injection_episodes if row["recovery_success"]) / len(injection_episodes)
             if injection_episodes

@@ -452,6 +452,45 @@ def check_phase21_no_usable_memory_skips_task_start_visibility():
     print("PASS phase2.1 no usable memory skips task-start visibility")
 
 
+def check_phase22_ineffective_reactivation_suppression():
+    agent = make_delayed_agent(
+        visibility_ttl=1,
+        reentry_cooldown_after_clear=0,
+        stale_steps_since_last_progress=1,
+        failure_observation_threshold=1,
+        require_check_valid_actions_since_progress=False,
+        suppress_ineffective_reactivation=True,
+        reactivation_effect_window="ttl",
+        max_consecutive_ineffective_reactivations=2,
+        allow_late_reactivation_after_new_signal=False,
+    )
+    prompt = "## Key Insights from Related Tasks\n1. Try a relevant recovery action."
+    agent._set_gmemory_prompt_state(cached_prompt=prompt, visible_prompt="", retrieve_step=0, reset_events=True)
+
+    drive_no_progress_step(agent, 0)
+    assert len(agent.gmemory_injection_events) == 1
+    assert agent.gmemory_injection_events[-1]["phase"] == "stuck"
+
+    drive_no_progress_step(agent, 1)
+    assert agent.visible_gmemory_prompt == ""
+
+    drive_no_progress_step(agent, 2)
+    assert len(agent.gmemory_injection_events) == 2
+    assert agent.gmemory_ineffective_reactivation_streak == 1
+
+    drive_no_progress_step(agent, 3)
+    assert agent.visible_gmemory_prompt == ""
+
+    drive_no_progress_step(agent, 4)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert len(agent.gmemory_injection_events) == 2
+    assert diagnostics["last_decision"]["skip_reason"] == "consecutive_ineffective_reactivation"
+    assert diagnostics["metrics"]["suppressed_reactivation_count"] == 1
+    assert diagnostics["metrics"]["ineffective_reactivation_streak"] == 2
+    assert diagnostics["suppression_reason"] == "consecutive_ineffective_reactivation"
+    print("PASS phase2.2 ineffective reactivation suppression")
+
+
 def check_phase2_stage3_analysis_metrics():
     fake_records = [
         {
@@ -482,6 +521,9 @@ def check_phase2_stage3_analysis_metrics():
                         "trigger_no_cached_memory_count": 0,
                         "trigger_no_usable_memory_count": 0,
                         "stuck_trigger_count": 2,
+                        "effective_reactivation_count": 1,
+                        "ineffective_reactivation_streak": 0,
+                        "suppressed_reactivation_count": 1,
                     },
                 },
                 "alfworld_action_stats": {"check_valid_actions_count": 3, "nothing_happens_count": 2},
@@ -561,6 +603,9 @@ def check_phase2_stage3_analysis_metrics():
     assert overall["task_start_ttl_expired_count"] == 1
     assert overall["memory_exposure_steps_total"] == 2
     assert overall["avg_memory_exposure_rate"] == 1 / 6
+    assert overall["effective_reactivation_count"] == 1
+    assert overall["suppressed_reactivation_count"] == 1
+    assert overall["suppressed_reactivation_episode_count"] == 1
     assert analysis["by_task_type"]["clean"]["injected_episode_count"] == 1
     assert analysis["by_task_type"]["cool"]["injected_episode_count"] == 0
     assert analysis["by_task_type"]["place"]["task_start_injected_episode_count"] == 1
@@ -1186,6 +1231,7 @@ def main():
     check_phase11_query_action_loop_trigger()
     check_phase21_task_start_ttl_then_stuck_reactivation()
     check_phase21_no_usable_memory_skips_task_start_visibility()
+    check_phase22_ineffective_reactivation_suppression()
     check_phase2_stage3_analysis_metrics()
     check_goal_contract_parser()
     check_insight_split()

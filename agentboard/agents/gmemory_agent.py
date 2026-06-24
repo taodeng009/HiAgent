@@ -78,6 +78,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_cooldown_block_count = 0
         self.gmemory_trigger_no_cached_memory_count = 0
         self.gmemory_trigger_no_usable_memory_count = 0
+        self.gmemory_ineffective_reactivation_streak = 0
+        self.gmemory_effective_reactivation_count = 0
+        self.gmemory_suppressed_reactivation_count = 0
+        self.gmemory_last_ineffective_reactivation_signal = None
+        self.gmemory_last_suppression_reason = ""
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
         self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
         self.gmemory_client = self._build_gmemory_client()
@@ -311,6 +316,19 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _query_action_loop_ratio_threshold(self) -> float:
         return max(0.0, min(1.0, float(self.gmemory_need_aware_intervention_config.get("query_action_loop_ratio_threshold", 0.6))))
 
+    def _suppress_ineffective_reactivation_enabled(self) -> bool:
+        return bool(self.gmemory_need_aware_intervention_config.get("suppress_ineffective_reactivation", False))
+
+    def _reactivation_effect_window(self) -> str:
+        window = str(self.gmemory_need_aware_intervention_config.get("reactivation_effect_window", "ttl_plus_3")).strip()
+        return window if window in {"ttl", "ttl_plus_3", "post"} else "ttl_plus_3"
+
+    def _max_consecutive_ineffective_reactivations(self) -> int:
+        return max(1, int(self.gmemory_need_aware_intervention_config.get("max_consecutive_ineffective_reactivations", 2)))
+
+    def _allow_late_reactivation_after_new_signal(self) -> bool:
+        return bool(self.gmemory_need_aware_intervention_config.get("allow_late_reactivation_after_new_signal", True))
+
     def _reset_intervention_runtime_state(self) -> None:
         self.gmemory_retrieve_step = None
         self.gmemory_visible_ttl_remaining = None
@@ -329,6 +347,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_cooldown_block_count = 0
         self.gmemory_trigger_no_cached_memory_count = 0
         self.gmemory_trigger_no_usable_memory_count = 0
+        self.gmemory_ineffective_reactivation_streak = 0
+        self.gmemory_effective_reactivation_count = 0
+        self.gmemory_suppressed_reactivation_count = 0
+        self.gmemory_last_ineffective_reactivation_signal = None
+        self.gmemory_last_suppression_reason = ""
 
     def _empty_intervention_diagnostics(self) -> Dict[str, Any]:
         return {
@@ -360,6 +383,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "nothing_happens_trigger": False,
             "query_action_loop_trigger": False,
             "trigger_reason": "",
+            "ineffective_reactivation_streak": 0,
+            "effective_reactivation_count": 0,
+            "suppressed_reactivation_count": 0,
+            "suppression_reason": "",
+            "reactivation_effect_window": "ttl_plus_3",
             "last_decision": {},
             "metrics": {},
         }
@@ -421,6 +449,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 "nothing_happens_trigger": self._nothing_happens_trigger_satisfied(),
                 "query_action_loop_trigger": self._query_action_loop_trigger_satisfied(),
                 "trigger_reason": self._current_trigger_reason(),
+                "ineffective_reactivation_streak": self.gmemory_ineffective_reactivation_streak,
+                "effective_reactivation_count": self.gmemory_effective_reactivation_count,
+                "suppressed_reactivation_count": self.gmemory_suppressed_reactivation_count,
+                "suppression_reason": self.gmemory_last_suppression_reason,
+                "reactivation_effect_window": self._reactivation_effect_window(),
                 "last_decision": dict(self.gmemory_last_intervention_decision),
                 "metrics": self._intervention_episode_metrics(),
             }
@@ -479,6 +512,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "cooldown_block_count": self.gmemory_cooldown_block_count,
             "trigger_no_cached_memory_count": self.gmemory_trigger_no_cached_memory_count,
             "trigger_no_usable_memory_count": self.gmemory_trigger_no_usable_memory_count,
+            "ineffective_reactivation_streak": self.gmemory_ineffective_reactivation_streak,
+            "effective_reactivation_count": self.gmemory_effective_reactivation_count,
+            "suppressed_reactivation_count": self.gmemory_suppressed_reactivation_count,
             "visible_clear_count": clear_count,
             "first_stuck_reactivation_step": first_stuck_reactivation_step,
             "memory_exposure_steps_total": self.gmemory_exposure_steps_total,
@@ -562,6 +598,72 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "cooldown_remaining": self.gmemory_cooldown_remaining,
         }
 
+    def _reactivation_signal(self, executed_action: str, observation: str) -> str:
+        trigger_reason = self._current_trigger_reason()
+        action = str(executed_action or "").strip().lower()
+        obs = re.sub(r"\s+", " ", str(observation or "").strip().lower())
+        if action == "check valid actions":
+            marker = "choose an action from these valid actions:"
+            if marker in obs:
+                obs = obs.split(marker, 1)[1]
+            actions = [part.strip() for part in obs.split(",") if part.strip()]
+            obs = ",".join(sorted(actions))[:500]
+        else:
+            obs = obs[:240]
+        return f"{trigger_reason}|{action}|{obs}"
+
+    def _reactivation_delta_for_window(self, event: Dict[str, Any]) -> float:
+        window = self._reactivation_effect_window()
+        if window == "ttl":
+            return float(event.get("delta_within_ttl") or 0.0)
+        if window == "post":
+            return float(event.get("post_injection_progress_delta") or 0.0)
+        return float(event.get("delta_within_ttl_plus_3") or 0.0)
+
+    def _reactivation_effect_window_closed(self, event: Dict[str, Any], step_id: int) -> bool:
+        injection_step = event.get("step")
+        if injection_step is None:
+            return False
+        visible_ttl = int(event.get("visible_ttl") or 0)
+        if self._reactivation_effect_window() == "ttl":
+            return step_id > int(injection_step) + visible_ttl
+        if self._reactivation_effect_window() == "post":
+            return True
+        return step_id > int(injection_step) + visible_ttl + 3
+
+    def _update_reactivation_effect_state(self, step_id: int) -> None:
+        for event in self.gmemory_injection_events:
+            if event.get("phase") != "stuck" or event.get("reactivation_effect_evaluated"):
+                continue
+            if not self._reactivation_effect_window_closed(event, step_id):
+                continue
+            event["effective_within_ttl"] = float(event.get("delta_within_ttl") or 0.0) > 0.0
+            event["effective_within_ttl_plus_3"] = float(event.get("delta_within_ttl_plus_3") or 0.0) > 0.0
+            event["reactivation_effect_window"] = self._reactivation_effect_window()
+            event["reactivation_effective"] = self._reactivation_delta_for_window(event) > 0.0
+            event["reactivation_effect_evaluated"] = True
+            if event["reactivation_effective"]:
+                self.gmemory_ineffective_reactivation_streak = 0
+                self.gmemory_effective_reactivation_count += 1
+                self.gmemory_last_ineffective_reactivation_signal = None
+            else:
+                self.gmemory_ineffective_reactivation_streak += 1
+                self.gmemory_last_ineffective_reactivation_signal = event.get("reactivation_signal")
+
+    def _should_suppress_reactivation(self, current_signal: str) -> Optional[str]:
+        if not self._suppress_ineffective_reactivation_enabled():
+            return None
+        if self.gmemory_ineffective_reactivation_streak < self._max_consecutive_ineffective_reactivations():
+            return None
+        if (
+            self._allow_late_reactivation_after_new_signal()
+            and current_signal
+            and self.gmemory_last_ineffective_reactivation_signal
+            and current_signal != self.gmemory_last_ineffective_reactivation_signal
+        ):
+            return None
+        return "consecutive_ineffective_reactivation"
+
     def _inject_cached_gmemory(
         self,
         step_id: int,
@@ -571,6 +673,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         phase: str = "stuck",
         visible_ttl: Optional[int] = None,
         cooldown: Optional[int] = None,
+        reactivation_signal: Optional[str] = None,
     ) -> None:
         self.visible_gmemory_prompt = self.cached_gmemory_prompt
         self.gmemory_prompt = self.visible_gmemory_prompt
@@ -598,6 +701,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "query_action_count_since_last_progress": self._query_action_count_since_last_progress(),
             "query_action_ratio_since_last_progress": self._query_action_ratio_since_last_progress(),
             "trigger_reason": self._current_trigger_reason(),
+            "reactivation_signal": reactivation_signal,
+            "reactivation_effect_window": self._reactivation_effect_window(),
+            "reactivation_effective": False,
+            "reactivation_effect_evaluated": False,
+            "effective_within_ttl": False,
+            "effective_within_ttl_plus_3": False,
             "gate_kept_count": self.gmemory_gate_diagnostics.get("kept_count"),
             "gate_dropped_count": self.gmemory_gate_diagnostics.get("dropped_count"),
         }
@@ -675,6 +784,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             self.gmemory_nothing_happens_since_last_progress = 0
             self.gmemory_check_valid_actions_since_last_progress = 0
             self.gmemory_inventory_since_last_progress = 0
+            self.gmemory_ineffective_reactivation_streak = 0
+            self.gmemory_last_ineffective_reactivation_signal = None
             if self.gmemory_active_injection_index is not None:
                 event = self.gmemory_injection_events[self.gmemory_active_injection_index]
                 event["post_injection_progress_delta"] = progress_rate - float(event.get("progress_at_injection") or 0.0)
@@ -687,6 +798,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             if str(executed_action or "").strip() == "inventory":
                 self.gmemory_inventory_since_last_progress += 1
 
+        self._update_injection_progress_metrics(step_id, progress_rate, progress_improved)
+        self._update_reactivation_effect_state(step_id)
         trigger_condition_satisfied = self._intervention_trigger_condition_satisfied()
         trigger_reason = self._current_trigger_reason() if trigger_condition_satisfied else ""
         in_reentry_cooldown = self.gmemory_cooldown_remaining > 0
@@ -722,17 +835,27 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                 allowed = False
                 self.gmemory_trigger_no_usable_memory_count += 1
             else:
-                skip_reason = "none"
-                allowed = True
-                self._inject_cached_gmemory(
-                    step_id,
-                    progress_rate,
-                    trigger_condition_satisfied,
-                    reason="stuck_reactivation" if self._need_aware_task_start_ttl_enabled() else "stuck_trigger",
-                    phase="stuck",
-                    visible_ttl=self._stuck_visibility_ttl(),
-                    cooldown=self._intervention_reentry_cooldown(),
-                )
+                reactivation_signal = self._reactivation_signal(executed_action, observation)
+                suppression_reason = self._should_suppress_reactivation(reactivation_signal)
+                if suppression_reason:
+                    skip_reason = suppression_reason
+                    allowed = False
+                    self.gmemory_suppressed_reactivation_count += 1
+                    self.gmemory_last_suppression_reason = suppression_reason
+                else:
+                    skip_reason = "none"
+                    allowed = True
+                    self.gmemory_last_suppression_reason = ""
+                    self._inject_cached_gmemory(
+                        step_id,
+                        progress_rate,
+                        trigger_condition_satisfied,
+                        reason="stuck_reactivation" if self._need_aware_task_start_ttl_enabled() else "stuck_trigger",
+                        phase="stuck",
+                        visible_ttl=self._stuck_visibility_ttl(),
+                        cooldown=self._intervention_reentry_cooldown(),
+                        reactivation_signal=reactivation_signal,
+                    )
             self._record_intervention_decision(
                 trigger_condition_satisfied=trigger_condition_satisfied,
                 intervention_allowed=allowed,
@@ -752,8 +875,6 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             )
         if self.gmemory_last_intervention_decision is not None:
             self.gmemory_last_intervention_decision["trigger_reason"] = trigger_reason
-
-        self._update_injection_progress_metrics(step_id, progress_rate, progress_improved)
 
         if memory_visible_at_step and self.gmemory_visible_ttl_remaining is not None:
             self.gmemory_visible_ttl_remaining = max(0, self.gmemory_visible_ttl_remaining - 1)
