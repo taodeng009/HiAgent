@@ -57,7 +57,11 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
     ttl_deltas = [float(event.get("delta_within_ttl") or 0.0) for event in injection_events]
     ttl_plus_3_deltas = [float(event.get("delta_within_ttl_plus_3") or 0.0) for event in injection_events]
     eventual_deltas = [float(event.get("eventual_delta_after_injection") or 0.0) for event in injection_events]
-    task_start_events = [event for event in injection_events if event.get("phase") == "task_start"]
+    task_start_events = [
+        event
+        for event in injection_events
+        if event.get("phase") in {"task_start", "task_start_persistent"}
+    ]
     stuck_events = [event for event in injection_events if event.get("phase") == "stuck"]
     task_start_deltas = [
         float(event.get("post_injection_progress_delta") or 0.0)
@@ -71,6 +75,8 @@ def episode_summary(record: Dict[str, Any]) -> Dict[str, Any]:
         "id": record.get("id"),
         "task_name": record.get("task_name", ""),
         "task_type": infer_task_type(record.get("task_name", "")),
+        "selected_intervention_policy": intervention.get("selected_intervention_policy"),
+        "policy_resolution_source": intervention.get("policy_resolution_source"),
         "success": bool(record.get("is_done")),
         "progress_rate": float(record.get("progress_rate") or 0.0),
         "retrieved": bool(intervention.get("retrieved")),
@@ -122,8 +128,20 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
     task_start_episodes = [row for row in summaries if row["task_start_injection_count"] > 0]
     stuck_reactivation_episodes = [row for row in summaries if row["stuck_reactivation_count"] > 0]
     injected_events = sum(row["injection_count"] for row in summaries)
+    resolution_source_counts: Dict[str, int] = {}
+    for row in summaries:
+        source = str(row.get("policy_resolution_source") or "missing")
+        resolution_source_counts[source] = resolution_source_counts.get(source, 0) + 1
+    baseline_rows = [row for row in summaries if "baseline_success" in row]
     return {
         "episode_count": total,
+        "success_count": sum(1 for row in summaries if row["success"]),
+        "success_rate": sum(1 for row in summaries if row["success"]) / total if total else 0.0,
+        "avg_progress_rate": _avg(row["progress_rate"] for row in summaries),
+        "selected_policy_missing_count": sum(
+            1 for row in summaries if not row.get("selected_intervention_policy")
+        ),
+        "policy_resolution_source_counts": dict(sorted(resolution_source_counts.items())),
         "retrieved_count": sum(1 for row in summaries if row["retrieved"]),
         "cached_count": sum(1 for row in summaries if row["cached"]),
         "visible_final_count": sum(1 for row in summaries if row["visible_final"]),
@@ -195,6 +213,26 @@ def aggregate_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_check_valid_actions_count": _avg(row["check_valid_actions_count"] for row in summaries),
         "memory_exposure_steps_total": sum(row["memory_exposure_steps_total"] for row in summaries),
         "avg_memory_exposure_rate": _avg(row["memory_exposure_rate"] for row in summaries),
+        "success_up": (
+            sum(1 for row in baseline_rows if row["success"] and not row["baseline_success"])
+            if baseline_rows
+            else None
+        ),
+        "success_down": (
+            sum(1 for row in baseline_rows if not row["success"] and row["baseline_success"])
+            if baseline_rows
+            else None
+        ),
+        "progress_up": (
+            sum(1 for row in baseline_rows if row["progress_rate"] > row["baseline_progress_rate"])
+            if baseline_rows
+            else None
+        ),
+        "progress_down": (
+            sum(1 for row in baseline_rows if row["progress_rate"] < row["baseline_progress_rate"])
+            if baseline_rows
+            else None
+        ),
     }
 
 
@@ -205,11 +243,58 @@ def aggregate_by_task_type(summaries: List[Dict[str, Any]]) -> Dict[str, Dict[st
     return {task_type: aggregate_summaries(rows) for task_type, rows in sorted(grouped.items())}
 
 
-def analyze_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_by_selected_policy(summaries: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in summaries:
+        policy = str(row.get("selected_intervention_policy") or "UNSPECIFIED")
+        grouped.setdefault(policy, []).append(row)
+    return {policy: aggregate_summaries(rows) for policy, rows in sorted(grouped.items())}
+
+
+def _records_by_identity(records: List[Dict[str, Any]], label: str) -> Dict[tuple[Any, str], Dict[str, Any]]:
+    indexed: Dict[tuple[Any, str], Dict[str, Any]] = {}
+    for record in records:
+        key = (record.get("id"), str(record.get("task_name") or ""))
+        if key in indexed:
+            raise ValueError(f"Duplicate {label} episode identity: {key!r}")
+        indexed[key] = record
+    return indexed
+
+
+def _attach_baseline(summaries: List[Dict[str, Any]], baseline_records: List[Dict[str, Any]]) -> None:
+    baseline_by_key = _records_by_identity(baseline_records, "baseline")
+    summary_by_key: Dict[tuple[Any, str], Dict[str, Any]] = {}
+    for summary in summaries:
+        key = (summary.get("id"), str(summary.get("task_name") or ""))
+        if key in summary_by_key:
+            raise ValueError(f"Duplicate mixed episode identity: {key!r}")
+        summary_by_key[key] = summary
+    mixed_keys = set(summary_by_key)
+    baseline_keys = set(baseline_by_key)
+    if mixed_keys != baseline_keys:
+        missing = sorted(baseline_keys - mixed_keys, key=str)
+        extra = sorted(mixed_keys - baseline_keys, key=str)
+        raise ValueError(
+            "Mixed/baseline episode identities do not align: "
+            f"missing_from_mixed={missing[:5]!r}, missing_from_baseline={extra[:5]!r}"
+        )
+    for key, summary in summary_by_key.items():
+        baseline = baseline_by_key[key]
+        summary["baseline_success"] = bool(baseline.get("is_done"))
+        summary["baseline_progress_rate"] = float(baseline.get("progress_rate") or 0.0)
+
+
+def analyze_records(
+    records: List[Dict[str, Any]],
+    baseline_records: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
     summaries = [episode_summary(record) for record in records]
+    if baseline_records is not None:
+        _attach_baseline(summaries, baseline_records)
     return {
         "overall": aggregate_summaries(summaries),
         "by_task_type": aggregate_by_task_type(summaries),
+        "by_selected_intervention_policy": aggregate_by_selected_policy(summaries),
         "episodes": summaries,
     }
 
@@ -224,15 +309,27 @@ def format_report(analysis: Dict[str, Any]) -> str:
         for key, value in metrics.items():
             lines.append(f"- {key}: {value}")
         lines.append("")
+    lines.extend(["## By Selected Intervention Policy", ""])
+    for policy, metrics in analysis["by_selected_intervention_policy"].items():
+        lines.append(f"### {policy}")
+        for key, value in metrics.items():
+            lines.append(f"- {key}: {value}")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("jsonl", type=Path, help="Path to logs/alfworld.jsonl")
+    parser.add_argument(
+        "--baseline-jsonl",
+        type=Path,
+        help="Aligned HiAgent baseline log used to calculate success/progress up and down",
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown")
     args = parser.parse_args()
-    analysis = analyze_records(load_json_stream(args.jsonl))
+    baseline_records = load_json_stream(args.baseline_jsonl) if args.baseline_jsonl else None
+    analysis = analyze_records(load_json_stream(args.jsonl), baseline_records=baseline_records)
     if args.json:
         print(json.dumps(analysis, ensure_ascii=False, indent=2))
     else:

@@ -1,0 +1,203 @@
+run:
+  max_num_steps: 30
+  num_exam: 134
+  # Optional inclusive global ALFWorld task-id range.
+  # Example: start_index: 80 and end_index: 109 evaluates tasks 80..109.
+  # Leave both commented out to run from task 0 using num_exam.
+  # start_index: 80
+  # end_index: 109
+  wandb: True
+  project_name: hiagent-h2-task-type-memory-router-full134
+  baseline_dir: data/baseline_results
+  log_path: ${PROJECT_PATH}/results/hiagent_h2_task_type_memory_router_full134
+
+agent:
+  name: GMemoryContextEfficientAgent
+  memory_size: 100
+  need_goal: True
+  use_parser: True
+  enable_retrieve_instruction: False
+  check_actions_prompt_mode: strict
+  gmemory:
+    enabled: True
+    base_url: http://127.0.0.1:8090
+    task_type: alfworld
+    recall_on_reset: True
+    upload_on_finish: false
+    memory_only: True
+    max_context_chars: 5000
+    timeout: 180.0
+    experiment_render_label: C1_GPT_OSS_insight_only_server_side
+    goal_contract_gate:
+      enabled: true
+      mode: per_insight_task_type_rule_v3
+      split_mode: c1_insight_lines
+      diagnostics_only: false
+      min_kept_insights: 1
+      max_kept_insights: 3
+      # Phase 2 revision: missing-finalization is diagnostic only. Server
+      # ablation showed hard-dropping it can remove useful object/device guidance.
+      state_finalization_missing_action: diagnostic
+    need_aware_intervention:
+      # Enable Stage 3 need-aware memory intervention.
+      # Options: true, false. false restores the original GateV3 task-start injection path.
+      enabled: true
+
+      # Intervention strategy.
+      # Options: disabled, delayed_task_level_memory_injection,
+      # task_start_ttl_then_stuck_reactivation,
+      # stuck_time_task_level_retrieval, subgoal_primary_goal_fallback_retrieval.
+      mode: delayed_task_level_memory_injection
+
+      # Number of completed environment interaction steps for which task-start
+      # memory stays visible in Phase 2.1 mode.
+      # Options: positive integer. Keep <=3 for first validation.
+      task_start_visibility_ttl: 2
+
+      # Number of completed environment interaction steps for which injected memory stays visible.
+      # Options: positive integer. Phase 1 smoke uses 2; default/full validation can use 3.
+      visibility_ttl: 3
+
+      # Number of completed environment interaction steps for stuck reactivation memory in Phase 2.1.
+      # Options: positive integer. Defaults to visibility_ttl when omitted.
+      stuck_visibility_ttl: 3
+
+      # Number of environment interaction steps to block re-injection after task-start memory is cleared.
+      # Options: non-negative integer. Usually match task_start_visibility_ttl.
+      reentry_cooldown_after_task_start_clear: 2
+
+      # Number of environment interaction steps to block re-injection after visible memory is cleared.
+      # Options: non-negative integer. 0 disables cooldown. Usually match visibility_ttl.
+      reentry_cooldown_after_clear: 3
+
+      # Trigger after this many completed env.step(action) calls without progress improvement.
+      # Options: non-negative integer. Phase 1 smoke uses 2; default/full validation can use 8.
+      stale_steps_since_last_progress: 6
+
+      # Required count of exact "Nothing happens." observations since last progress before trigger.
+      # Options: non-negative integer. Phase 1 smoke uses 1; default/full validation can use 2.
+      failure_observation_threshold: 2
+
+      # Whether trigger also requires at least one "check valid actions" action since last progress.
+      # Options: true, false. true is the conservative/default trigger.
+      require_check_valid_actions_since_progress: true
+
+      # Stuck signal policy.
+      # Options: nothing_happens_only, nothing_happens_and_check, query_action_loop,
+      # nothing_happens_or_query_action_loop. Phase 1.1 default includes query-action loops.
+      failure_signal_policy: nothing_happens_or_query_action_loop
+
+      # Minimum count of query actions since last progress for query-action loop trigger.
+      # Query actions are "check valid actions" plus "inventory". Options: non-negative integer.
+      query_action_loop_count_threshold: 3
+
+      # Minimum ratio of query actions over stale steps for query-action loop trigger.
+      # Options: float in [0, 1]. 0.6 means at least 60% of no-progress actions are queries.
+      query_action_loop_ratio_threshold: 0.6
+
+      # Whether progress improvement refreshes the current visible memory TTL.
+      # Options: true, false. Phase 1 should keep false so progress does not create persistent injection.
+      refresh_ttl_on_progress: false
+
+      # Whether progress improvement immediately clears visible memory.
+      # Options: true, false. Phase 1 should keep false; memory clears by TTL.
+      clear_on_progress: false
+
+      # Phase 2.2: suppress repeated stuck reactivation when prior injections
+      # did not improve progress in the configured effect window.
+      # Options: true, false. false preserves existing Phase 2.1/Stage3 behavior.
+      suppress_ineffective_reactivation: true
+
+      # Window used to judge whether a stuck reactivation was effective.
+      # Options: ttl, ttl_plus_3, post. ttl_plus_3 is the default analysis window.
+      reactivation_effect_window: ttl_plus_3
+
+      # Stop same-plateau reactivation after this many consecutive ineffective
+      # stuck injections unless a new signal is detected.
+      # Options: positive integer.
+      max_consecutive_ineffective_reactivations: 2
+
+      # Allow one more reactivation after suppression threshold if the current
+      # trigger signal changes, e.g. new valid-action set or observation.
+      # Options: true, false.
+      allow_late_reactivation_after_new_signal: false
+
+      # Stage 3 Phase 2.3: resolve an effective intervention profile for every
+      # ALFWorld episode. Set enabled=false to restore the global mode/options
+      # above without changing the implementation.
+      task_type_policy:
+        enabled: true
+        default_profile: GATEV3_PERSISTENT
+        routes:
+          place: MEMORY_OFF
+          clean: NOTSV_STALE6
+          heat: GATEV3_PERSISTENT
+          cool: GATEV3_PERSISTENT
+          puttwo: NOTSV_STALE6
+          look: MEMORY_OFF
+        profiles:
+          GATEV3_PERSISTENT:
+            mode: gatev3_persistent
+          MEMORY_OFF:
+            mode: memory_off
+          NOTSV_STALE6:
+            mode: delayed_task_level_memory_injection
+            stale_steps_since_last_progress: 6
+            visibility_ttl: 3
+            stuck_visibility_ttl: 3
+            reentry_cooldown_after_clear: 3
+
+llm:
+  qwen3_5_4b_vllm_server:
+    name: gpt
+    engine: ./Qwen3.5-4B
+    context_length: 32768
+    use_azure: False
+    temperature: 0.
+    top_p: 1
+    retry_delays: 5
+    max_retry_iters: 3
+    max_tokens: 512
+    stop:
+    use_parser: False
+  gpt-4o:
+    name: gpt
+    engine: gpt-4o
+    context_length: 8192
+    use_azure: False
+    temperature: 0.
+    top_p: 1
+    retry_delays: 20
+    max_retry_iters: 15
+    stop: "\n"
+    use_parser: False
+
+env:
+  alfworld:
+    name: alfworld
+    base_config: ${PROJECT_PATH}/agentboard/environment/alfworld/base_config.yaml
+    split: eval_out_of_distribution
+    batch_size: 1
+    label_path: ${PROJECT_PATH}/data/alfworld/test.jsonl
+    check_inventory: True
+    check_actions: check valid actions
+    init_prompt_path: ${PROJECT_PATH}/agentboard/prompts/VanillaAgent/alfworld_base.json
+
+    # Phase 2 targeted ablation: evaluate state-change task types only.
+    # Remove or comment out target_task_types/target_task_limits for a full 134-task run.
+
+#    target_task_types:
+#      - place
+#      - clean
+#      - cool
+#      - heat
+#      - look
+#      - puttwo
+#    # Per-type cap for server validation; each type should run about 10 tasks.
+#    target_task_limits:
+#      place: 10
+#      clean: 10
+#      cool: 10
+#      heat: 10
+#      look: 10
+#      puttwo: 10

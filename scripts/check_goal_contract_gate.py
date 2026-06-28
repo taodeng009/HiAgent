@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import importlib.util
 import os
+import re
 import sys
 import types
 
@@ -58,6 +59,11 @@ class FakeGMemoryClient:
 
     def retrieve(self, **kwargs):
         return {"memory_prompt": self.memory_prompt}
+
+
+class FailingGMemoryClient:
+    def retrieve(self, **kwargs):
+        raise RuntimeError("synthetic retrieve failure")
 
 
 def make_agent(
@@ -195,6 +201,62 @@ def make_task_start_ttl_agent(**overrides):
     }
     config.update(overrides)
     return make_agent(mode="per_insight_task_type_rule_v3", need_aware_intervention=config)
+
+
+def task_type_router_config(**policy_overrides):
+    policy = {
+        "enabled": True,
+        "default_profile": "GATEV3_PERSISTENT",
+        "routes": {
+            "place": "MEMORY_OFF",
+            "clean": "NOTSV_STALE6",
+            "heat": "GATEV3_PERSISTENT",
+            "cool": "GATEV3_PERSISTENT",
+            "puttwo": "NOTSV_STALE6",
+            "look": "MEMORY_OFF",
+        },
+        "profiles": {
+            "GATEV3_PERSISTENT": {"mode": "gatev3_persistent"},
+            "MEMORY_OFF": {"mode": "memory_off"},
+            "NOTSV_STALE6": {
+                "mode": "delayed_task_level_memory_injection",
+                "stale_steps_since_last_progress": 6,
+                "visibility_ttl": 3,
+                "stuck_visibility_ttl": 3,
+                "reentry_cooldown_after_clear": 3,
+            },
+        },
+    }
+    policy.update(policy_overrides)
+    return {
+        "enabled": True,
+        "mode": "delayed_task_level_memory_injection",
+        "visibility_ttl": 3,
+        "stuck_visibility_ttl": 3,
+        "task_start_visibility_ttl": 2,
+        "reentry_cooldown_after_clear": 3,
+        "reentry_cooldown_after_task_start_clear": 2,
+        "stale_steps_since_last_progress": 6,
+        "failure_observation_threshold": 2,
+        "require_check_valid_actions_since_progress": True,
+        "failure_signal_policy": "nothing_happens_or_query_action_loop",
+        "query_action_loop_count_threshold": 3,
+        "query_action_loop_ratio_threshold": 0.6,
+        "refresh_ttl_on_progress": False,
+        "clear_on_progress": False,
+        "suppress_ineffective_reactivation": True,
+        "reactivation_effect_window": "ttl_plus_3",
+        "max_consecutive_ineffective_reactivations": 2,
+        "allow_late_reactivation_after_new_signal": False,
+        "task_type_policy": policy,
+    }
+
+
+def make_task_type_router_agent(**policy_overrides):
+    return make_agent(
+        mode="per_insight_task_type_rule_v3",
+        need_aware_intervention=task_type_router_config(**policy_overrides),
+    )
 
 
 def drive_no_progress_step(agent, step, action="go to desk 1", observation="Nothing happens."):
@@ -491,6 +553,190 @@ def check_phase22_ineffective_reactivation_suppression():
     print("PASS phase2.2 ineffective reactivation suppression")
 
 
+def _reset_router_agent(agent, task_type, goal, memory_prompt):
+    agent.set_current_task_type(task_type)
+    agent.gmemory_client = FakeGMemoryClient(memory_prompt)
+    agent.reset(goal=goal, init_obs="You are in the middle of a room.")
+
+
+def check_task_type_router_profiles_and_episode_isolation():
+    agent = make_task_type_router_agent()
+    place_memory = (
+        "## Key Insights from Related Tasks\n"
+        "1. Find the plate, pick it up, and put it on the countertop."
+    )
+    _reset_router_agent(agent, " PLACE ", "put a plate in countertop.", place_memory)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "MEMORY_OFF"
+    assert diagnostics["raw_task_type"] == " PLACE "
+    assert diagnostics["detected_task_type"] == "place"
+    assert diagnostics["route_matched"] is True
+    assert diagnostics["selected_profile_differs_from_default"] is True
+    assert diagnostics["policy_resolution_source"] == "explicit_route"
+    assert diagnostics["effective_mode"] == "memory_off"
+    assert agent.cached_gmemory_prompt
+    assert agent.visible_gmemory_prompt == ""
+    for step in range(6):
+        drive_no_progress_step(agent, step, action="check valid actions" if step == 0 else "go to desk 1")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["injection_events"] == []
+    assert diagnostics["metrics"]["memory_exposure_steps_total"] == 0
+    assert diagnostics["metrics"]["memory_exposure_rate"] == 0.0
+
+    clean_memory = (
+        "## Key Insights from Related Tasks\n"
+        "1. Clean the plate with the sinkbasin, then put it on the countertop."
+    )
+    _reset_router_agent(agent, "clean", "put a clean plate in countertop.", clean_memory)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "NOTSV_STALE6"
+    assert diagnostics["effective_mode"] == "delayed_task_level_memory_injection"
+    assert diagnostics["effective_stale_steps_since_last_progress"] == 6
+    assert diagnostics["effective_visibility_ttl"] == 3
+    assert agent.visible_gmemory_prompt == ""
+    for step in range(6):
+        drive_no_progress_step(agent, step, action="check valid actions" if step == 0 else "go to desk 1")
+    assert agent.visible_gmemory_prompt == agent.cached_gmemory_prompt
+    assert agent.gmemory_injection_events[-1]["phase"] == "stuck"
+
+    cool_memory = (
+        "## Key Insights from Related Tasks\n"
+        "1. Cool the potato with the fridge, then put it in the microwave."
+    )
+    _reset_router_agent(agent, "cool", "cool some potato and put it in microwave.", cool_memory)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "GATEV3_PERSISTENT"
+    assert diagnostics["selected_profile_differs_from_default"] is False
+    assert diagnostics["effective_mode"] == "gatev3_persistent"
+    assert agent.visible_gmemory_prompt == agent.cached_gmemory_prompt
+    drive_no_progress_step(agent, 0)
+    drive_no_progress_step(agent, 1)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["metrics"]["memory_exposure_steps_total"] == 2
+    assert diagnostics["metrics"]["memory_exposure_rate"] == 1.0
+    assert diagnostics["injection_events"][0]["phase"] == "task_start_persistent"
+    print("PASS task-type router profiles and episode isolation")
+
+
+def check_task_type_router_missing_unknown_and_failure_paths():
+    memory_prompt = (
+        "## Key Insights from Related Tasks\n"
+        "1. Find the target object and complete the required final placement."
+    )
+    agent = make_task_type_router_agent()
+    _reset_router_agent(agent, "place", "put a plate in countertop.", memory_prompt)
+
+    # No setter call: the previous place route must not leak into this episode.
+    agent.gmemory_client = FakeGMemoryClient(memory_prompt)
+    agent.reset(goal="put a plate in countertop.", init_obs="You are in the middle of a room.")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "GATEV3_PERSISTENT"
+    assert diagnostics["detected_task_type"] == ""
+    assert diagnostics["policy_resolution_source"] == "default_missing"
+
+    _reset_router_agent(agent, "NewTaskType", "put a plate in countertop.", memory_prompt)
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "GATEV3_PERSISTENT"
+    assert diagnostics["detected_task_type"] == "newtasktype"
+    assert diagnostics["policy_resolution_source"] == "default_unknown"
+
+    agent.set_current_task_type("clean")
+    agent.gmemory_client = FailingGMemoryClient()
+    agent.reset(goal="put a clean plate in countertop.", init_obs="You are in the middle of a room.")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "NOTSV_STALE6"
+    assert diagnostics["retrieved"] is False
+
+    agent.set_current_task_type("look")
+    agent.gmemory_client = None
+    agent.reset(goal="look at a mug with desklamp.", init_obs="You are in the middle of a room.")
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["selected_intervention_policy"] == "MEMORY_OFF"
+    assert diagnostics["effective_mode"] == "memory_off"
+    print("PASS task-type router missing, unknown, and retrieve failure paths")
+
+
+def check_task_type_router_invalid_config_fails_loudly():
+    routes = task_type_router_config()["task_type_policy"]["routes"].copy()
+    routes["place"] = "MISSING_PROFILE"
+    agent = make_task_type_router_agent(routes=routes)
+    agent.set_current_task_type("place")
+    agent.gmemory_client = FakeGMemoryClient("unused")
+    try:
+        agent.reset(goal="put a plate in countertop.", init_obs="room")
+        raise AssertionError("invalid profile should fail")
+    except ValueError as exc:
+        assert "MISSING_PROFILE" in str(exc)
+
+    profiles = task_type_router_config()["task_type_policy"]["profiles"].copy()
+    profiles["MEMORY_OFF"] = {"mode": "unsupported_mode"}
+    agent = make_task_type_router_agent(profiles=profiles)
+    agent.set_current_task_type("place")
+    try:
+        agent.reset(goal="put a plate in countertop.", init_obs="room")
+        raise AssertionError("unsupported mode should fail")
+    except ValueError as exc:
+        assert "unsupported_mode" in str(exc)
+    print("PASS task-type router invalid config fails loudly")
+
+
+def check_task_type_router_disabled_preserves_global_mode():
+    config = task_type_router_config(enabled=False)
+    agent = make_agent(mode="per_insight_task_type_rule_v3", need_aware_intervention=config)
+    _reset_router_agent(
+        agent,
+        "cool",
+        "cool some potato and put it in microwave.",
+        "## Key Insights from Related Tasks\n1. Cool the potato with the fridge.",
+    )
+    diagnostics = agent.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["task_type_policy_enabled"] is False
+    assert diagnostics["selected_intervention_policy"] == "GLOBAL"
+    assert diagnostics["policy_resolution_source"] == "router_disabled"
+    assert diagnostics["effective_mode"] == "delayed_task_level_memory_injection"
+    assert agent.visible_gmemory_prompt == ""
+
+    master_disabled = make_agent(
+        mode="per_insight_task_type_rule_v3",
+        need_aware_intervention={
+            "enabled": False,
+            "mode": "disabled",
+            "task_type_policy": "ignored because the master switch is off",
+        },
+    )
+    _reset_router_agent(
+        master_disabled,
+        "cool",
+        "cool some potato and put it in microwave.",
+        "## Key Insights from Related Tasks\n1. Cool the potato with the fridge.",
+    )
+    diagnostics = master_disabled.get_diagnostics()["gmemory_intervention"]
+    assert diagnostics["task_type_policy_enabled"] is False
+    assert diagnostics["effective_mode"] == "disabled"
+    assert master_disabled.visible_gmemory_prompt == master_disabled.cached_gmemory_prompt
+    print("PASS task-type router disabled preserves global mode")
+
+
+def check_task_type_router_yaml_preflight():
+    config_path = os.path.join(
+        PROJECT_ROOT,
+        "eval_configs",
+        "hiagent",
+        "alfworld_h2_goal_contract_gate_c1_v3_state.yaml",
+    )
+    with open(config_path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    assert re.search(r"(?m)^  num_exam:\s*134\s*$", text)
+    assert not re.search(r"(?m)^\s+start_index:\s*", text)
+    assert not re.search(r"(?m)^\s+end_index:\s*", text)
+    assert re.search(r"(?m)^\s+upload_on_finish:\s*false\s*$", text)
+    assert re.search(r"(?m)^\s+task_type_policy:\s*$", text)
+    assert re.search(r"(?m)^\s+default_profile:\s*GATEV3_PERSISTENT\s*$", text)
+    for task_type in ("place", "clean", "heat", "cool", "puttwo", "look"):
+        assert re.search(rf"(?m)^\s+{task_type}:\s+[A-Z0-9_]+\s*$", text)
+    print("PASS task-type router YAML preflight")
+
+
 def check_phase2_stage3_analysis_metrics():
     fake_records = [
         {
@@ -500,6 +746,8 @@ def check_phase2_stage3_analysis_metrics():
             "progress_rate": 0.5,
             "agent_diagnostics": {
                 "gmemory_intervention": {
+                    "selected_intervention_policy": "NOTSV_STALE6",
+                    "policy_resolution_source": "explicit_route",
                     "retrieved": True,
                     "cached": True,
                     "visible": False,
@@ -536,6 +784,8 @@ def check_phase2_stage3_analysis_metrics():
             "progress_rate": 0.0,
             "agent_diagnostics": {
                 "gmemory_intervention": {
+                    "selected_intervention_policy": "GATEV3_PERSISTENT",
+                    "policy_resolution_source": "explicit_route",
                     "retrieved": True,
                     "cached": True,
                     "visible": False,
@@ -559,6 +809,8 @@ def check_phase2_stage3_analysis_metrics():
             "progress_rate": 1.0,
             "agent_diagnostics": {
                 "gmemory_intervention": {
+                    "selected_intervention_policy": "GATEV3_PERSISTENT",
+                    "policy_resolution_source": "explicit_route",
                     "retrieved": True,
                     "cached": True,
                     "visible": False,
@@ -566,7 +818,7 @@ def check_phase2_stage3_analysis_metrics():
                     "injection_events": [
                         {
                             "step": -1,
-                            "phase": "task_start",
+                            "phase": "task_start_persistent",
                             "reason": "task_start_ttl",
                             "post_injection_progress_delta": 1.0,
                             "delta_within_ttl": 0.5,
@@ -591,6 +843,8 @@ def check_phase2_stage3_analysis_metrics():
     analysis = stage3_analysis.analyze_records(fake_records)
     overall = analysis["overall"]
     assert overall["episode_count"] == 3
+    assert overall["success_rate"] == 1 / 3
+    assert overall["avg_progress_rate"] == 0.5
     assert overall["injected_episode_count"] == 2
     assert overall["task_start_injected_episode_count"] == 1
     assert overall["stuck_reactivation_episode_count"] == 1
@@ -609,6 +863,24 @@ def check_phase2_stage3_analysis_metrics():
     assert analysis["by_task_type"]["clean"]["injected_episode_count"] == 1
     assert analysis["by_task_type"]["cool"]["injected_episode_count"] == 0
     assert analysis["by_task_type"]["place"]["task_start_injected_episode_count"] == 1
+    assert analysis["by_selected_intervention_policy"]["NOTSV_STALE6"]["episode_count"] == 1
+    assert analysis["by_selected_intervention_policy"]["GATEV3_PERSISTENT"]["episode_count"] == 2
+
+    baseline_records = [
+        {"id": 0, "task_name": fake_records[0]["task_name"], "is_done": True, "progress_rate": 0.75},
+        {"id": 1, "task_name": fake_records[1]["task_name"], "is_done": False, "progress_rate": 0.0},
+        {"id": 2, "task_name": fake_records[2]["task_name"], "is_done": False, "progress_rate": 0.5},
+    ]
+    aligned = stage3_analysis.analyze_records(fake_records, baseline_records=baseline_records)
+    assert aligned["overall"]["success_up"] == 1
+    assert aligned["overall"]["success_down"] == 1
+    assert aligned["overall"]["progress_up"] == 1
+    assert aligned["overall"]["progress_down"] == 1
+    try:
+        stage3_analysis.analyze_records(fake_records, baseline_records=baseline_records[:-1])
+        raise AssertionError("misaligned baseline should fail")
+    except ValueError as exc:
+        assert "do not align" in str(exc)
     print("PASS phase2 stage3 analysis metrics")
 
 
@@ -1232,6 +1504,11 @@ def main():
     check_phase21_task_start_ttl_then_stuck_reactivation()
     check_phase21_no_usable_memory_skips_task_start_visibility()
     check_phase22_ineffective_reactivation_suppression()
+    check_task_type_router_profiles_and_episode_isolation()
+    check_task_type_router_missing_unknown_and_failure_paths()
+    check_task_type_router_invalid_config_fails_loudly()
+    check_task_type_router_disabled_preserves_global_mode()
+    check_task_type_router_yaml_preflight()
     check_phase2_stage3_analysis_metrics()
     check_goal_contract_parser()
     check_insight_split()

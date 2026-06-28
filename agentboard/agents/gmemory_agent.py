@@ -1,6 +1,7 @@
 """Context-efficient HiAgent variant with GMemory retrieval hooks."""
 from __future__ import annotations
 
+import copy
 import os
 import re
 from contextlib import redirect_stdout
@@ -56,8 +57,16 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
         self.gmemory_memory_only = bool(self.gmemory_config.get("memory_only", False))
         self.gmemory_goal_contract_gate_config = self.gmemory_config.get("goal_contract_gate", {}) or {}
-        self.gmemory_need_aware_intervention_config = self.gmemory_config.get("need_aware_intervention", {}) or {}
+        self.gmemory_base_need_aware_intervention_config = copy.deepcopy(
+            self.gmemory_config.get("need_aware_intervention", {}) or {}
+        )
+        self.gmemory_need_aware_intervention_config = copy.deepcopy(
+            self.gmemory_base_need_aware_intervention_config
+        )
+        self.pending_task_type = None
+        self.raw_current_task_type = ""
         self.current_task_type = ""
+        self.gmemory_task_type_policy_metadata = self._default_task_type_policy_metadata()
         self.cached_gmemory_prompt = ""
         self.visible_gmemory_prompt = ""
         self.gmemory_prompt = ""
@@ -88,7 +97,11 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_client = self._build_gmemory_client()
 
     def set_current_task_type(self, task_type: Optional[str]) -> None:
-        self.current_task_type = str(task_type or "").strip()
+        raw_task_type = str(task_type or "")
+        self.pending_task_type = raw_task_type
+        # Preserve the legacy behavior for helpers called before reset().
+        self.raw_current_task_type = raw_task_type
+        self.current_task_type = self._normalize_task_type(raw_task_type)
 
     def _build_gmemory_client(self) -> Optional[GMemoryClient]:
         if not self.gmemory_enabled:
@@ -103,6 +116,8 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def reset(self, goal, init_obs, init_act=None):
         super().reset(goal, init_obs, init_act)
         self._reset_intervention_runtime_state()
+        raw_task_type = self._consume_pending_task_type()
+        self._activate_effective_intervention_policy(raw_task_type)
         self._set_gmemory_prompt_state(cached_prompt="", visible_prompt="", retrieve_step=None, reset_events=True)
         self.gmemory_gate_diagnostics = self._empty_gate_diagnostics()
         self.gmemory_intervention_diagnostics = self._empty_intervention_diagnostics()
@@ -140,7 +155,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                         )
                         self._refresh_intervention_diagnostics()
                 else:
-                    visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                    visible_prompt = (
+                        ""
+                        if self._delayed_task_level_intervention_enabled()
+                        or self._memory_off_intervention_enabled()
+                        else final_prompt
+                    )
                     self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
                 self.gmemory_gate_diagnostics["final_memory_chars"] = len(final_prompt)
                 self.gmemory_gate_diagnostics["final_memory_prompt"] = final_prompt
@@ -161,7 +181,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
                         )
                         self._refresh_intervention_diagnostics()
                 else:
-                    visible_prompt = "" if self._delayed_task_level_intervention_enabled() else final_prompt
+                    visible_prompt = (
+                        ""
+                        if self._delayed_task_level_intervention_enabled()
+                        or self._memory_off_intervention_enabled()
+                        else final_prompt
+                    )
                     self._set_gmemory_prompt_state(cached_prompt=final_prompt, visible_prompt=visible_prompt, retrieve_step=0)
             logger.info(
                 "GMemory retrieve completed: memory_prompt_chars=%s",
@@ -233,6 +258,112 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
     def _goal_contract_gate_state_finalization_action(self) -> str:
         return str(self.gmemory_goal_contract_gate_config.get("state_finalization_missing_action", "diagnostic")).strip()
 
+    @staticmethod
+    def _normalize_task_type(task_type: Optional[str]) -> str:
+        return str(task_type or "").strip().lower()
+
+    def _consume_pending_task_type(self) -> str:
+        raw_task_type = self.pending_task_type if self.pending_task_type is not None else ""
+        self.pending_task_type = None
+        self.raw_current_task_type = str(raw_task_type or "")
+        self.current_task_type = self._normalize_task_type(self.raw_current_task_type)
+        return self.raw_current_task_type
+
+    def _default_task_type_policy_metadata(self) -> Dict[str, Any]:
+        return {
+            "task_type_policy_enabled": False,
+            "raw_task_type": getattr(self, "raw_current_task_type", ""),
+            "detected_task_type": getattr(self, "current_task_type", ""),
+            "selected_intervention_policy": "GLOBAL",
+            "default_intervention_policy": None,
+            "route_matched": False,
+            "selected_profile_differs_from_default": False,
+            "policy_resolution_source": "router_disabled",
+        }
+
+    def _resolve_task_type_intervention_policy(self, task_type: Optional[str]) -> Dict[str, Any]:
+        base_config = self.gmemory_base_need_aware_intervention_config
+        policy = base_config.get("task_type_policy", {}) or {}
+        master_enabled = bool(base_config.get("enabled", False))
+        if master_enabled and not isinstance(policy, dict):
+            raise ValueError("need_aware_intervention.task_type_policy must be a mapping")
+        policy_enabled = master_enabled and bool(policy.get("enabled", False))
+        normalized_task_type = self._normalize_task_type(task_type)
+        if not policy_enabled:
+            return {
+                "effective_config": copy.deepcopy(base_config),
+                "metadata": {
+                    "task_type_policy_enabled": False,
+                    "raw_task_type": str(task_type or ""),
+                    "detected_task_type": normalized_task_type,
+                    "selected_intervention_policy": "GLOBAL",
+                    "default_intervention_policy": None,
+                    "route_matched": False,
+                    "selected_profile_differs_from_default": False,
+                    "policy_resolution_source": "router_disabled",
+                },
+            }
+
+        routes = policy.get("routes", {}) or {}
+        profiles = policy.get("profiles", {}) or {}
+        if not isinstance(routes, dict):
+            raise ValueError("task_type_policy.routes must be a mapping")
+        if not isinstance(profiles, dict):
+            raise ValueError("task_type_policy.profiles must be a mapping")
+
+        default_profile = str(policy.get("default_profile") or "").strip()
+        if not default_profile:
+            raise ValueError("task_type_policy.default_profile is required when the router is enabled")
+        if default_profile not in profiles:
+            raise ValueError(f"Unknown task_type_policy default profile: {default_profile}")
+
+        route_matched = bool(normalized_task_type) and normalized_task_type in routes
+        if route_matched:
+            selected_profile = str(routes.get(normalized_task_type) or "").strip()
+            resolution_source = "explicit_route"
+        else:
+            selected_profile = default_profile
+            resolution_source = "default_unknown" if normalized_task_type else "default_missing"
+        if not selected_profile or selected_profile not in profiles:
+            raise ValueError(
+                f"Unknown task_type_policy profile {selected_profile!r} for task type {normalized_task_type!r}"
+            )
+        profile = profiles[selected_profile]
+        if not isinstance(profile, dict):
+            raise ValueError(f"task_type_policy profile {selected_profile!r} must be a mapping")
+
+        effective_config = copy.deepcopy(base_config)
+        effective_config.update(copy.deepcopy(profile))
+        mode = str(effective_config.get("mode") or "").strip()
+        supported_modes = {
+            "gatev3_persistent",
+            "memory_off",
+            "delayed_task_level_memory_injection",
+            "task_start_ttl_then_stuck_reactivation",
+        }
+        if mode not in supported_modes:
+            raise ValueError(
+                f"Unsupported task_type_policy mode {mode!r} in profile {selected_profile!r}"
+            )
+        return {
+            "effective_config": effective_config,
+            "metadata": {
+                "task_type_policy_enabled": True,
+                "raw_task_type": str(task_type or ""),
+                "detected_task_type": normalized_task_type,
+                "selected_intervention_policy": selected_profile,
+                "default_intervention_policy": default_profile,
+                "route_matched": route_matched,
+                "selected_profile_differs_from_default": selected_profile != default_profile,
+                "policy_resolution_source": resolution_source,
+            },
+        }
+
+    def _activate_effective_intervention_policy(self, task_type: Optional[str]) -> None:
+        resolved = self._resolve_task_type_intervention_policy(task_type)
+        self.gmemory_need_aware_intervention_config = resolved["effective_config"]
+        self.gmemory_task_type_policy_metadata = resolved["metadata"]
+
     def _need_aware_intervention_enabled(self) -> bool:
         return bool(self.gmemory_need_aware_intervention_config.get("enabled", False))
 
@@ -243,6 +374,12 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         return (
             self._need_aware_intervention_enabled()
             and self._need_aware_intervention_mode() == "delayed_task_level_memory_injection"
+        )
+
+    def _memory_off_intervention_enabled(self) -> bool:
+        return (
+            self._need_aware_intervention_enabled()
+            and self._need_aware_intervention_mode() == "memory_off"
         )
 
     def _need_aware_task_start_ttl_enabled(self) -> bool:
@@ -353,8 +490,61 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_last_ineffective_reactivation_signal = None
         self.gmemory_last_suppression_reason = ""
 
-    def _empty_intervention_diagnostics(self) -> Dict[str, Any]:
+    def _effective_intervention_config_snapshot(self) -> Dict[str, Any]:
+        keys = (
+            "enabled",
+            "mode",
+            "visibility_ttl",
+            "stuck_visibility_ttl",
+            "task_start_visibility_ttl",
+            "reentry_cooldown_after_clear",
+            "reentry_cooldown_after_task_start_clear",
+            "stale_steps_since_last_progress",
+            "failure_observation_threshold",
+            "require_check_valid_actions_since_progress",
+            "failure_signal_policy",
+            "query_action_loop_count_threshold",
+            "query_action_loop_ratio_threshold",
+            "refresh_ttl_on_progress",
+            "clear_on_progress",
+            "suppress_ineffective_reactivation",
+            "reactivation_effect_window",
+            "max_consecutive_ineffective_reactivations",
+            "allow_late_reactivation_after_new_signal",
+        )
         return {
+            key: copy.deepcopy(self.gmemory_need_aware_intervention_config[key])
+            for key in keys
+            if key in self.gmemory_need_aware_intervention_config
+        }
+
+    def _intervention_policy_diagnostics(self) -> Dict[str, Any]:
+        metadata = copy.deepcopy(
+            getattr(self, "gmemory_task_type_policy_metadata", self._default_task_type_policy_metadata())
+        )
+        metadata.update(
+            {
+                "effective_mode": self._need_aware_intervention_mode(),
+                "effective_stale_steps_since_last_progress": self._intervention_stale_threshold(),
+                "effective_visibility_ttl": self._intervention_visibility_ttl(),
+                "effective_stuck_visibility_ttl": self._stuck_visibility_ttl(),
+                "effective_task_start_visibility_ttl": self._task_start_visibility_ttl(),
+                "effective_reentry_cooldown_after_clear": self._intervention_reentry_cooldown(),
+                "effective_reentry_cooldown_after_task_start_clear": self._task_start_reentry_cooldown(),
+                "effective_failure_observation_threshold": self._intervention_failure_observation_threshold(),
+                "effective_require_check_valid_actions_since_progress": self._intervention_requires_check_valid_actions(),
+                "effective_failure_signal_policy": self._intervention_failure_signal_policy(),
+                "effective_suppress_ineffective_reactivation": self._suppress_ineffective_reactivation_enabled(),
+                "effective_reactivation_effect_window": self._reactivation_effect_window(),
+                "effective_max_consecutive_ineffective_reactivations": self._max_consecutive_ineffective_reactivations(),
+                "effective_allow_late_reactivation_after_new_signal": self._allow_late_reactivation_after_new_signal(),
+                "effective_config": self._effective_intervention_config_snapshot(),
+            }
+        )
+        return metadata
+
+    def _empty_intervention_diagnostics(self) -> Dict[str, Any]:
+        diagnostics = {
             "enabled": self._need_aware_intervention_enabled()
             if hasattr(self, "gmemory_need_aware_intervention_config")
             else False,
@@ -391,6 +581,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             "last_decision": {},
             "metrics": {},
         }
+        if hasattr(self, "gmemory_need_aware_intervention_config"):
+            diagnostics.update(self._intervention_policy_diagnostics())
+        return diagnostics
 
     def _set_gmemory_prompt_state(
         self,
@@ -770,14 +963,14 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         nothing_happens: bool,
         is_check_valid_actions: bool,
     ) -> None:
-        if not self._need_aware_prompt_scheduling_enabled():
-            self._refresh_intervention_diagnostics()
-            return
-
         self.gmemory_interaction_steps += 1
         memory_visible_at_step = bool(self.visible_gmemory_prompt)
         if memory_visible_at_step:
             self.gmemory_exposure_steps_total += 1
+        if not self._need_aware_prompt_scheduling_enabled():
+            self._refresh_intervention_diagnostics()
+            return
+
         progress_improved = progress_rate > previous_progress_rate
         if progress_improved:
             self.gmemory_stale_steps_since_last_progress = 0
