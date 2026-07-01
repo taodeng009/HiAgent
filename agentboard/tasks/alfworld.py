@@ -43,7 +43,8 @@ class Evalalfworld(BaseTask):
                  baseline_dir = None,
                  log_path = None,
                  start_index = 0,
-                 end_index = None
+                 end_index = None,
+                 task_ids = None
                  ):
         
         super().__init__()
@@ -63,11 +64,38 @@ class Evalalfworld(BaseTask):
         self.end_index = None if end_index is None else int(end_index)
         if self.end_index is not None and self.end_index < self.start_index:
             raise ValueError("ALFWorld end_index must be >= start_index for an inclusive task range.")
+        self.task_ids = self._parse_task_ids(task_ids)
         self.target_task_types, self.target_task_limits = self._parse_target_task_filter(env_config)
 
         self.baseline_dir = baseline_dir
 
         self.agentboard = TaskLogger(task_name="alfworld", log_path=log_path, max_num_steps=self.max_num_steps, baseline_dir=self.baseline_dir)
+
+    @staticmethod
+    def _parse_task_ids(task_ids):
+        """Normalize an optional collection of global ALFWorld task ids."""
+        if task_ids is None:
+            return None
+        if isinstance(task_ids, str):
+            task_ids = [item.strip() for item in task_ids.split(",") if item.strip()]
+        if not isinstance(task_ids, (list, tuple, set)):
+            raise ValueError("ALFWorld task_ids must be a list of non-negative integers.")
+
+        normalized = set()
+        for task_id in task_ids:
+            if isinstance(task_id, bool):
+                raise ValueError("ALFWorld task_ids must contain only non-negative integers.")
+            try:
+                parsed_id = int(task_id)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid ALFWorld task id: {!r}".format(task_id))
+            if parsed_id < 0 or str(task_id).strip() != str(parsed_id):
+                raise ValueError("Invalid ALFWorld task id: {!r}".format(task_id))
+            normalized.add(parsed_id)
+
+        if not normalized:
+            raise ValueError("ALFWorld task_ids must not be empty when configured.")
+        return tuple(sorted(normalized))
 
     def _parse_target_task_filter(self, env_config):
         if not isinstance(env_config, dict):
@@ -325,18 +353,26 @@ class Evalalfworld(BaseTask):
         difficulties = []
         target_task_counts = {}
 
-        # start_index/end_index select global ALFWorld task ids using a closed
-        # interval: [start_index, end_index]. Logged ids remain global ids.
-        eval_stop = self.num_exams
-        if self.end_index is not None:
-            eval_stop = max(eval_stop, self.end_index + 1)
+        # task_ids selects exact global ids and takes precedence over the legacy
+        # num_exams/start_index/end_index modes. Logged ids remain global ids.
+        selected_task_ids = None if self.task_ids is None else set(self.task_ids)
+        if selected_task_ids is not None:
+            eval_stop = self.task_ids[-1] + 1
+        else:
+            eval_stop = self.num_exams
+            if self.end_index is not None:
+                eval_stop = max(eval_stop, self.end_index + 1)
         for id in range(eval_stop):
 
             ob, info = self.env.reset()
-            if id < self.start_index:
-                continue
-            if self.end_index is not None and id > self.end_index:
-                break
+            if selected_task_ids is not None:
+                if id not in selected_task_ids:
+                    continue
+            else:
+                if id < self.start_index:
+                    continue
+                if self.end_index is not None and id > self.end_index:
+                    break
 
             ob = '\n'.join(ob[0].split('\n\n')[1:])
             name = '/'.join(info['extra.gamefile'][0].split('/')[-3:-1])
@@ -371,7 +407,9 @@ class Evalalfworld(BaseTask):
                 break
 
         if not srs:
-            raise RuntimeError("No ALFWorld tasks were evaluated; check target_task_types and target_task_limits.")
+            raise RuntimeError(
+                "No ALFWorld tasks were evaluated; check task_ids, target_task_types, and target_task_limits."
+            )
 
         sr = sum(srs) * 1.0 / len(srs)
         pr = sum(scores) * 1.0 / len(scores)
@@ -422,6 +460,7 @@ class Evalalfworld(BaseTask):
         # Example: start_index=80, end_index=109 evaluates ids 80..109.
         start_index = run_config.get("start_index", 0)
         end_index = run_config.get("end_index", None)
+        task_ids = run_config.get("task_ids", None)
         return cls(
                    llm_config=llm_config,
                    agent_name=agent_name,
@@ -434,5 +473,6 @@ class Evalalfworld(BaseTask):
                    baseline_dir = baseline_dir,
                    log_path = log_path,
                    start_index = start_index,
-                   end_index = end_index
+                   end_index = end_index,
+                   task_ids = task_ids
                    )

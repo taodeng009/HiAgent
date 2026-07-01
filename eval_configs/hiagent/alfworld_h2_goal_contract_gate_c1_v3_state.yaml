@@ -1,15 +1,13 @@
 run:
   max_num_steps: 30
-  num_exam: 134
-  # Optional inclusive global ALFWorld task-id range.
-  # Example: start_index: 80 and end_index: 109 evaluates tasks 80..109.
-  # Leave both commented out to run from task 0 using num_exam.
-  # start_index: 80
-  # end_index: 109
+  num_exam: 3
+  # Exact global ALFWorld task ids. This takes precedence over num_exam and
+  # the optional start_index/end_index range.
+  task_ids: [8, 19, 20]
   wandb: True
-  project_name: hiagent-h2-task-type-memory-router-full134
+  project_name: hiagent-h2-task-type-memory-router-tasks-8-19-20
   baseline_dir: data/baseline_results
-  log_path: ${PROJECT_PATH}/results/hiagent_h2_task_type_memory_router_full134
+  log_path: ${PROJECT_PATH}/results/hiagent_h2_task_type_memory_router_tasks_8_19_20
 
 agent:
   name: GMemoryContextEfficientAgent

@@ -726,7 +726,8 @@ def check_task_type_router_yaml_preflight():
     )
     with open(config_path, "r", encoding="utf-8") as handle:
         text = handle.read()
-    assert re.search(r"(?m)^  num_exam:\s*134\s*$", text)
+    assert re.search(r"(?m)^  num_exam:\s*3\s*$", text)
+    assert re.search(r"(?m)^  task_ids:\s*\[8, 19, 20\]\s*$", text)
     assert not re.search(r"(?m)^\s+start_index:\s*", text)
     assert not re.search(r"(?m)^\s+end_index:\s*", text)
     assert re.search(r"(?m)^\s+upload_on_finish:\s*false\s*$", text)
