@@ -1,9 +1,9 @@
 run:
   max_num_steps: 30
-  num_exam: 3
+  num_exam: 134
   # Exact global ALFWorld task ids. This takes precedence over num_exam and
   # the optional start_index/end_index range.
-  task_ids: [8, 19, 20]
+  # task_ids: [8, 19, 20]
   wandb: True
   project_name: hiagent-h2-task-type-memory-router-tasks-8-19-20
   baseline_dir: data/baseline_results
@@ -21,13 +21,13 @@ agent:
     base_url: http://127.0.0.1:8090
     task_type: alfworld
     recall_on_reset: True
-    upload_on_finish: false
+    upload_on_finish: True
     memory_only: True
     max_context_chars: 5000
     timeout: 180.0
     experiment_render_label: C1_GPT_OSS_insight_only_server_side
     goal_contract_gate:
-      enabled: true
+      enabled: false
       mode: per_insight_task_type_rule_v3
       split_mode: c1_insight_lines
       diagnostics_only: false
@@ -39,7 +39,7 @@ agent:
     need_aware_intervention:
       # Enable Stage 3 need-aware memory intervention.
       # Options: true, false. false restores the original GateV3 task-start injection path.
-      enabled: true
+      enabled: false
 
       # Intervention strategy.
       # Options: disabled, delayed_task_level_memory_injection,
@@ -104,7 +104,7 @@ agent:
       # Phase 2.2: suppress repeated stuck reactivation when prior injections
       # did not improve progress in the configured effect window.
       # Options: true, false. false preserves existing Phase 2.1/Stage3 behavior.
-      suppress_ineffective_reactivation: true
+      suppress_ineffective_reactivation: false
 
       # Window used to judge whether a stuck reactivation was effective.
       # Options: ttl, ttl_plus_3, post. ttl_plus_3 is the default analysis window.
@@ -118,13 +118,13 @@ agent:
       # Allow one more reactivation after suppression threshold if the current
       # trigger signal changes, e.g. new valid-action set or observation.
       # Options: true, false.
-      allow_late_reactivation_after_new_signal: false
+      allow_late_reactivation_after_new_signal: true
 
       # Stage 3 Phase 2.3: resolve an effective intervention profile for every
       # ALFWorld episode. Set enabled=false to restore the global mode/options
       # above without changing the implementation.
       task_type_policy:
-        enabled: true
+        enabled: false
         default_profile: GATEV3_PERSISTENT
         routes:
           place: MEMORY_OFF
