@@ -86,6 +86,8 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
         self.reme_finish_submit_index = 0
         self.reme_diagnostics = self._empty_diagnostics()
         self.reme_diagnostics["query"] = self._raw_goal_query(goal)
+        current_context = self._build_current_context(init_obs)
+        self.reme_diagnostics["current_context_chars"] = len(current_context)
 
         if not self.reme_enabled or not self.reme_retrieve_enabled or self.reme_client is None:
             return
@@ -98,6 +100,7 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
                 rerank=bool(self.reme_retrieve_config.get("rerank", False)),
                 rewrite=bool(self.reme_retrieve_config.get("rewrite", False)),
                 max_context_chars=int(self.reme_retrieve_config.get("max_context_chars", 3000)),
+                current_context=current_context,
             )
             self.reme_memory_prompt = self._normalise_memory_prompt(response.get("memory_prompt", ""))
             self.reme_retrieval_id = response.get("retrieval_id")
@@ -267,6 +270,10 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
 
     def _raw_goal_query(self, goal: Any) -> str:
         return str(goal or "").strip()
+
+    def _build_current_context(self, init_obs: Any) -> str:
+        observation = str(init_obs or "").strip()
+        return f"Initial observation: {observation}"
 
     def _json_scalar(self, value: Any):
         if value is None:

@@ -26,6 +26,7 @@ class ReMeClient:
         rerank: bool = False,
         rewrite: bool = False,
         max_context_chars: int = 3000,
+        current_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "workspace_id": workspace_id,
@@ -36,6 +37,8 @@ class ReMeClient:
             "rewrite": rewrite,
             "max_context_chars": max_context_chars,
         }
+        if current_context is not None:
+            payload["current_context"] = current_context
         data = self._post("/api/v1/memory/retrieve", payload, self.retrieve_timeout)
         self._validate_retrieve_response(data)
         return data
