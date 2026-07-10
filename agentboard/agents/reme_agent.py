@@ -59,6 +59,7 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
         self.reme_memory_prompt = ""
         self.reme_retrieval_id = None
         self.reme_retrieved_memory_ids: List[str] = []
+        self.reme_retrieved_memories: List[Dict[str, Any]] = []
         self.reme_diagnostics = self._empty_diagnostics()
         self.reme_finish_submit_index = 0
 
@@ -81,6 +82,7 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
         self.reme_memory_prompt = ""
         self.reme_retrieval_id = None
         self.reme_retrieved_memory_ids = []
+        self.reme_retrieved_memories = []
         self.reme_finish_submit_index = 0
         self.reme_diagnostics = self._empty_diagnostics()
         self.reme_diagnostics["query"] = self._raw_goal_query(goal)
@@ -105,17 +107,31 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
                 for memory in memories
                 if isinstance(memory, dict) and memory.get("memory_id") is not None
             ]
+            self.reme_retrieved_memories = self._summarise_retrieved_memories(memories)
             self.reme_diagnostics.update(
                 {
                     "retrieve_attempted": True,
                     "retrieve_success": True,
                     "retrieval_id": self.reme_retrieval_id,
                     "retrieved_memory_ids": list(self.reme_retrieved_memory_ids),
+                    "retrieved_memories": list(self.reme_retrieved_memories),
                     "memory_prompt_chars": len(self.reme_memory_prompt),
                     "returned_count": len(memories),
                 }
             )
-            logger.info("ReMe retrieve completed: memory_prompt_chars=%s", len(self.reme_memory_prompt))
+            logger.info(
+                "ReMe retrieve completed: memory_prompt_chars=%s, scores=%s",
+                len(self.reme_memory_prompt),
+                [
+                    {
+                        "memory_id": item.get("memory_id"),
+                        "retrieval_score": item.get("retrieval_score"),
+                        "validation_score": item.get("validation_score"),
+                        "score": item.get("score"),
+                    }
+                    for item in self.reme_retrieved_memories
+                ],
+            )
         except Exception as exc:
             self.reme_memory_prompt = ""
             self.reme_diagnostics.update(
@@ -259,6 +275,26 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
             return float(value)
         except (TypeError, ValueError):
             return value
+
+    def _summarise_retrieved_memories(self, memories: Any) -> List[Dict[str, Any]]:
+        if not isinstance(memories, list):
+            return []
+        summaries: List[Dict[str, Any]] = []
+        for rank, memory in enumerate(memories, start=1):
+            if not isinstance(memory, dict):
+                continue
+            summaries.append(
+                {
+                    "rank": rank,
+                    "memory_id": self._json_scalar(memory.get("memory_id")),
+                    "retrieval_score": self._json_scalar(memory.get("retrieval_score")),
+                    "validation_score": self._json_scalar(memory.get("validation_score")),
+                    "score": self._json_scalar(memory.get("score")),
+                    "source_trajectory_id": self._json_scalar(memory.get("source_trajectory_id")),
+                    "memory_type": self._json_scalar(memory.get("memory_type")),
+                }
+            )
+        return summaries
 
     def _empty_diagnostics(self) -> Dict[str, Any]:
         return {
