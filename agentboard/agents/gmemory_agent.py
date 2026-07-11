@@ -54,6 +54,7 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
         self.gmemory_enabled = bool(self.gmemory_config.get("enabled", False))
         self.gmemory_recall_on_reset = bool(self.gmemory_config.get("recall_on_reset", True))
         self.gmemory_upload_on_finish = bool(self.gmemory_config.get("upload_on_finish", True))
+        self.gmemory_upload_success_only = bool(self.gmemory_config.get("upload_success_only", False))
         self.gmemory_max_context_chars = int(self.gmemory_config.get("max_context_chars", 1000))
         self.gmemory_memory_only = bool(self.gmemory_config.get("memory_only", False))
         self.gmemory_goal_contract_gate_config = self.gmemory_config.get("goal_contract_gate", {}) or {}
@@ -2004,6 +2005,9 @@ class GMemoryContextEfficientAgent(ContextEfficientAgentV2):
             return None
         if success is None:
             logger.warning("GMemory episode upload skipped: success is missing")
+            return None
+        if self.gmemory_upload_success_only and not bool(success):
+            logger.info("GMemory episode upload skipped: task was not successful")
             return None
         episode = self._memory_to_gmemory_episode(
             task_type=task_type,
