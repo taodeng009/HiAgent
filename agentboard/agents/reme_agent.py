@@ -53,6 +53,7 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
         self.reme_workspace_id = self.reme_config.get("workspace_id", "")
         self.reme_retrieve_config = self.reme_config.get("retrieve", {}) or {}
         self.reme_finish_trial_config = self.reme_config.get("finish_trial", {}) or {}
+        self.reme_prompt_wrapper_config = self.reme_config.get("prompt_wrapper", {}) or {}
         self.reme_retrieve_enabled = bool(self.reme_retrieve_config.get("enabled", True))
         self.reme_finish_trial_enabled = bool(self.reme_finish_trial_config.get("enabled", False))
         self.reme_client = self._build_reme_client()
@@ -160,17 +161,45 @@ class ReMeContextEfficientAgent(ContextEfficientAgentV2):
             prompt = self._inject_reme_prompt(prompt)
             self.reme_diagnostics["memory_injected"] = True
             self.reme_diagnostics["injected_prompt_chars"] = len(self.reme_memory_prompt)
+            self.reme_diagnostics["wrapped_prompt_chars"] = len(self._build_reme_prompt_block())
         print(f'------------[Prompt Start]-----------\n{prompt}\n----------[Prompt END]------------')
         return prompt
 
     def _inject_reme_prompt(self, prompt: str) -> str:
-        block = f"{self.reme_memory_prompt}\n\n"
+        block = f"{self._build_reme_prompt_block()}\n\n"
         marker = self._current_history_marker()
         if marker:
             idx = prompt.find(marker)
             if idx >= 0:
                 return prompt[:idx] + block + prompt[idx:]
         return block + prompt
+
+    def _build_reme_prompt_block(self) -> str:
+        memory_prompt = self.reme_memory_prompt.strip()
+        if not memory_prompt:
+            return ""
+        if not bool(self.reme_prompt_wrapper_config.get("enabled", True)):
+            self.reme_diagnostics["prompt_wrapper_enabled"] = False
+            return memory_prompt
+        heading = str(
+            self.reme_prompt_wrapper_config.get(
+                "heading",
+                "## Relevant Memories from Related Tasks",
+            )
+        ).strip()
+        instruction = str(
+            self.reme_prompt_wrapper_config.get(
+                "instruction",
+                (
+                    "The following memories describe when they are useful and what strategy they suggest. "
+                    "You may refer to them during your task execution to improve problem-solving accuracy."
+                ),
+            )
+        ).strip()
+        delimiter = str(self.reme_prompt_wrapper_config.get("delimiter", "---")).strip()
+        parts = [part for part in [heading, instruction, memory_prompt, delimiter] if part]
+        self.reme_diagnostics["prompt_wrapper_enabled"] = True
+        return "\n".join(parts)
 
     def remember_current_task(
         self,
